@@ -1,8 +1,8 @@
+import importlib
 import pkgutil
 import sys
 
-# Todo: I think these imports are not needed.
-# allowed command modules (please append them alphabetically ordered)
+# Explicit imports keep command modules registered in sys.modules.
 import tclCommands.TclCommandAddCircle
 import tclCommands.TclCommandAddPolygon
 import tclCommands.TclCommandAddPolyline
@@ -52,9 +52,9 @@ import tclCommands.TclCommandWriteGCode
 
 __all__ = []
 
-for loader, name, is_pkg in pkgutil.walk_packages(__path__):
-    module = loader.find_module(name).load_module(name)
-    __all__.append(name)
+for _finder, name, _is_pkg in pkgutil.walk_packages(__path__, prefix=__name__ + "."):
+    importlib.import_module(name)
+    __all__.append(name.rsplit(".", 1)[-1])
 
 
 def register_all_commands(app, commands):

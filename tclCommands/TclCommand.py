@@ -3,7 +3,7 @@ import re
 import FlatCAMApp
 import abc
 import collections
-from PyQt4 import QtCore
+from PySide6 import QtCore
 from contextlib import contextmanager
 from FlatCAMObj import FlatCAMGerber, FlatCAMExcellon, FlatCAMGeometry, FlatCAMCNCjob, FlatCAMObj
 
@@ -366,7 +366,7 @@ class TclCommandSignaled(TclCommand):
                 QtCore.QTimer.singleShot(timeout, report_quit)
 
             # Block
-            loop.exec_()
+            loop.exec()
 
             # Restore exception management
             sys.excepthook = oeh

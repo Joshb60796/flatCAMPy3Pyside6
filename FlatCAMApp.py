@@ -13,7 +13,7 @@ import re
 import webbrowser
 import os
 import tkinter
-from PyQt4 import Qt, QtCore, QtGui
+from PySide6 import QtCore, QtGui, QtWidgets
 import time  # Just used for debugging. Double check before removing.
 from xml.dom.minidom import parseString as parse_xml_string
 from contextlib import contextmanager
@@ -38,6 +38,23 @@ from ToolTransform import ToolTransform
 import tclCommands
 
 from camlib import *
+import flatcam_defaults
+
+
+def _qt_get_open_filename(caption, directory=''):
+    """QFileDialog wrapper compatible with PySide6 (returns path string)."""
+    path, _filter = QtWidgets.QFileDialog.getOpenFileName(
+        None, caption, directory or ''
+    )
+    return path or ''
+
+
+def _qt_get_save_filename(caption, directory=''):
+    """QFileDialog wrapper compatible with PySide6 (returns path string)."""
+    path, _filter = QtWidgets.QFileDialog.getSaveFileName(
+        None, caption, directory or ''
+    )
+    return path or ''
 
 
 ########################################
@@ -94,10 +111,10 @@ class App(QtCore.QObject):
     # Inform the user
     # Handled by:
     #  * App.info() --> Print on the status bar
-    inform = QtCore.pyqtSignal(str)
+    inform = QtCore.Signal(str)
 
     # General purpose background task
-    worker_task = QtCore.pyqtSignal(dict)
+    worker_task = QtCore.Signal(dict)
 
     # File opened
     # Handled by:
@@ -106,29 +123,29 @@ class App(QtCore.QObject):
     # Note: Setting the parameters to unicode does not seem
     #       to have an effect. Then are received as Qstring
     #       anyway.
-    file_opened = QtCore.pyqtSignal(str, str)  # File type and filename
+    file_opened = QtCore.Signal(str, str)  # File type and filename
 
-    progress = QtCore.pyqtSignal(int)  # Percentage of progress
+    progress = QtCore.Signal(int)  # Percentage of progress
 
-    plots_updated = QtCore.pyqtSignal()
+    plots_updated = QtCore.Signal()
 
     # Emitted by new_object() and passes the new object as argument and a plot flag
     # on_object_created() adds the object to the collection, plot the object if plot flag is True
     # and emits new_object_available.
-    object_created = QtCore.pyqtSignal(object, bool)
+    object_created = QtCore.Signal(object, bool)
 
     # Emitted when a new object has been added to the collection
     # and is ready to be used.
-    new_object_available = QtCore.pyqtSignal(object)
+    new_object_available = QtCore.Signal(object)
 
-    message = QtCore.pyqtSignal(str, str, str)
+    message = QtCore.Signal(str, str, str)
 
     # Emmited when shell command is finished(one command only)
-    shell_command_finished = QtCore.pyqtSignal(object)
+    shell_command_finished = QtCore.Signal(object)
 
     # Emitted when an unhandled exception happens
     # in the worker task.
-    thread_exception = QtCore.pyqtSignal(object)
+    thread_exception = QtCore.Signal(object)
 
     @property
     def version_date_str(self):
@@ -209,9 +226,7 @@ class App(QtCore.QObject):
         QtCore.QObject.__init__(self)
 
         self.ui = FlatCAMGUI(self.version, name=self.version_name)
-        self.connect(self.ui,
-                     QtCore.SIGNAL("geomUpdate(int, int, int, int)"),
-                     self.save_geometry)
+        self.ui.geom_update.connect(self.save_geometry)
 
         #### Plot Area ####
         # self.plotcanvas = PlotCanvas(self.ui.splitter)
@@ -227,7 +242,7 @@ class App(QtCore.QObject):
         ##############
         self.recent = []
 
-        self.clipboard = QtGui.QApplication.clipboard()
+        self.clipboard = QtGui.QGuiApplication.clipboard()
 
         self.proc_container = FCVisibleProcessContainer(self.ui.activity_view)
 
@@ -283,80 +298,9 @@ class App(QtCore.QObject):
 
         self.defaults = LoudDict()
         self.defaults.set_change_callback(self.on_defaults_dict_change)  # When the dictionary changes.
-        self.defaults.update({
-            "global_mouse_pan_button": 2,
-            "serial": 0,
-            "stats": {},
-            "units": "IN",
-            "gerber_plot": True,
-            "gerber_solid": True,
-            "gerber_multicolored": False,
-            "gerber_isotooldia": 0.016,
-            "gerber_isopasses": 1,
-            "gerber_isooverlap": 0.15,
-            "gerber_cutouttooldia": 0.07,
-            "gerber_cutoutmargin": 0.1,
-            "gerber_cutoutgapsize": 0.15,
-            "gerber_gaps": "4",
-            "gerber_noncoppermargin": 0.0,
-            "gerber_noncopperrounded": False,
-            "gerber_bboxmargin": 0.0,
-            "gerber_bboxrounded": False,
-            "excellon_plot": True,
-            "excellon_solid": False,
-            "excellon_drillz": -0.1,
-            "excellon_travelz": 0.1,
-            "excellon_feedrate": 3.0,
-            "excellon_spindlespeed": None,
-            "excellon_toolchangez": 1.0,
-            "excellon_tooldia": 0.016,
-            "geometry_plot": True,
-            "geometry_cutz": -0.002,
-            "geometry_travelz": 0.1,
-            "geometry_feedrate": 3.0,
-            "geometry_cnctooldia": 0.016,
-            "geometry_spindlespeed": None,
-            "geometry_painttooldia": 0.07,
-            "geometry_paintoverlap": 0.15,
-            "geometry_paintmargin": 0.0,
-            "geometry_selectmethod": "single",
-            "geometry_pathconnect": True,
-            "geometry_paintcontour": True,
-            "cncjob_plot": True,
-            "cncjob_tooldia": 0.016,
-            "cncjob_prepend": "",
-            "cncjob_append": "",
-            "cncjob_dwell": True,
-            "cncjob_dwelltime": 1,
-            "background_timeout": 300000,  # Default value is 5 minutes
-            "verbose_error_level": 0,  # Shell verbosity 0 = default
-                                       # (python trace only for unknown errors),
-                                       # 1 = show trace(show trace allways),
-                                       # 2 = (For the future).
-
-            # Persistence
-            "last_folder": None,
-            # Default window geometry
-            "def_win_x": 100,
-            "def_win_y": 100,
-            "def_win_w": 1024,
-            "def_win_h": 650,
-
-            # Constants...
-            "defaults_save_period_ms": 20000,   # Time between default saves.
-            "shell_shape": [500, 300],          # Shape of the shell in pixels.
-            "shell_at_startup": False,          # Show the shell at startup.
-            "recent_limit": 10,                 # Max. items in recent list.
-            "fit_key": '1',
-            "zoom_out_key": '2',
-            "zoom_in_key": '3',
-            "zoom_ratio": 1.5,
-            "point_clipboard_format": "(%.4f, %.4f)",
-            "zdownrate": None,
-            "excellon_zeros": "L",
-            "gerber_use_buffer_for_union": True,
-            "cncjob_coordinate_format": "X%.4fY%.4f"
-        })
+        # MM-first defaults for Genmitsu PROVer Ultra 3030-class PCB milling
+        # (0.003" 30° V-bit isolation, 1/32" endmill cutout/paint). See flatcam_defaults.py.
+        self.defaults.update(flatcam_defaults.app_persistent_defaults("MM"))
 
         ###############################
         ### Load defaults from file ###
@@ -424,51 +368,11 @@ class App(QtCore.QObject):
 
         self.options = LoudDict()
         self.options.set_change_callback(self.on_options_dict_change)
-        self.options.update({
-            "units": "IN",
-            "gerber_plot": True,
-            "gerber_solid": True,
-            "gerber_multicolored": False,
-            "gerber_isotooldia": 0.016,
-            "gerber_isopasses": 1,
-            "gerber_isooverlap": 0.15,
-            "gerber_combine_passes": True,
-            "gerber_cutouttooldia": 0.07,
-            "gerber_cutoutmargin": 0.1,
-            "gerber_cutoutgapsize": 0.15,
-            "gerber_gaps": "4",
-            "gerber_noncoppermargin": 0.0,
-            "gerber_noncopperrounded": False,
-            "gerber_bboxmargin": 0.0,
-            "gerber_bboxrounded": False,
-            "excellon_plot": True,
-            "excellon_solid": False,
-            "excellon_drillz": -0.1,
-            "excellon_travelz": 0.1,
-            "excellon_feedrate": 3.0,
-            "excellon_spindlespeed": None,
-            "excellon_toolchangez": 1.0,
-            "excellon_tooldia": 0.016,
-            "geometry_plot": True,
-            "geometry_cutz": -0.002,
-            "geometry_travelz": 0.1,
-            "geometry_feedrate": 3.0,
-            "geometry_spindlespeed": None,
-            "geometry_cnctooldia": 0.016,
-            "geometry_painttooldia": 0.07,
-            "geometry_paintoverlap": 0.15,
-            "geometry_paintmargin": 0.0,
-            "geometry_selectmethod": "single",
-            "cncjob_plot": True,
-            "cncjob_tooldia": 0.016,
-            "cncjob_prepend": "",
-            "cncjob_append": "",
-            "background_timeout": 300000,  # Default value is 5 minutes
-            "verbose_error_level": 0,  # Shell verbosity:
-                                       # 0 = default(python trace only for unknown errors),
-                                       # 1 = show trace(show trace allways), 2 = (For the future).
-        })
+        # Start from MM project CAM defaults, then overlay full app defaults.
+        self.options.update(flatcam_defaults.project_options_defaults("MM"))
         self.options.update(self.defaults)  # Copy app defaults to project options
+        # Ensure project units stay MM after defaults merge (defaults also set MM).
+        self.options["units"] = "MM"
         #self.options_write_form()
         self.on_options_combo_change(0)  # Will show the initial form
 
@@ -483,7 +387,7 @@ class App(QtCore.QObject):
         self.worker = Worker(self)
         self.thr1 = QtCore.QThread()
         self.worker.moveToThread(self.thr1)
-        self.connect(self.thr1, QtCore.SIGNAL("started()"), self.worker.run)
+        self.thr1.started.connect(self.worker.run)
         self.thr1.start()
 
         #### Check for updates ####
@@ -493,9 +397,8 @@ class App(QtCore.QObject):
         self.worker2 = Worker(self, name="worker2")
         self.thr2 = QtCore.QThread()
         self.worker2.moveToThread(self.thr2)
-        self.connect(self.thr2, QtCore.SIGNAL("started()"), self.worker2.run)
-        self.connect(self.thr2, QtCore.SIGNAL("started()"),
-                     lambda: self.worker_task.emit({'fcn': self.version_check,
+        self.thr2.started.connect(self.worker2.run)
+        self.thr2.started.connect(lambda: self.worker_task.emit({'fcn': self.version_check,
                                                     'params': [],
                                                     'worker_name': "worker2"}))
         self.thr2.start()
@@ -605,11 +508,11 @@ class App(QtCore.QObject):
 
         self.init_tcl()
 
-        self.ui.shell_dock = QtGui.QDockWidget("FlatCAM TCL Shell")
+        self.ui.shell_dock = QtWidgets.QDockWidget("FlatCAM TCL Shell")
         self.ui.shell_dock.setWidget(self.shell)
         self.ui.shell_dock.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
-        self.ui.shell_dock.setFeatures(QtGui.QDockWidget.DockWidgetMovable |
-                             QtGui.QDockWidget.DockWidgetFloatable | QtGui.QDockWidget.DockWidgetClosable)
+        self.ui.shell_dock.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable |
+                             QtWidgets.QDockWidget.DockWidgetFloatable | QtWidgets.QDockWidget.DockWidgetClosable)
         self.ui.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.ui.shell_dock)
 
 
@@ -786,8 +689,8 @@ class App(QtCore.QObject):
             raise unknownException
 
     def display_tcl_error(self, error, error_info=None):
-        """
-        escape bracket [ with \  otherwise there is error
+        r"""
+        Escape bracket [ with \ otherwise there is error
         "ERROR: missing close-bracket" instead of real error
         :param error: it may be text  or exception
         :return: None
@@ -923,7 +826,7 @@ class App(QtCore.QObject):
         """
 
         # Type of message in brackets at the begining of the message.
-        match = re.search("\[([^\]]+)\](.*)", msg)
+        match = re.search(r"\[([^\]]+)\](.*)", msg)
         if match:
             level = match.group(1)
             msg_ = match.group(2)
@@ -972,12 +875,12 @@ class App(QtCore.QObject):
         self.save_defaults()
 
     def message_dialog(self, title, message, kind="info"):
-        icon = {"info": QtGui.QMessageBox.Information,
-                "warning": QtGui.QMessageBox.Warning,
-                "error": QtGui.QMessageBox.Critical}[str(kind)]
-        dlg = QtGui.QMessageBox(icon, title, message, parent=self.ui)
+        icon = {"info": QtWidgets.QMessageBox.Information,
+                "warning": QtWidgets.QMessageBox.Warning,
+                "error": QtWidgets.QMessageBox.Critical}[str(kind)]
+        dlg = QtWidgets.QMessageBox(icon, title, message, parent=self.ui)
         dlg.setText(message)
-        dlg.exec_()
+        dlg.exec()
 
     def register_recent(self, kind, filename):
 
@@ -1087,7 +990,7 @@ class App(QtCore.QObject):
         self.log.debug("Moving new object back to main thread.")
 
         # Move the object to the main thread and let the app know that it is available.
-        obj.moveToThread(QtGui.QApplication.instance().thread())
+        obj.moveToThread(QtWidgets.QApplication.instance().thread())
         self.object_created.emit(obj, self.plot)
 
         return obj
@@ -1120,25 +1023,25 @@ class App(QtCore.QObject):
         version_date_str = self.version_date_str
         version_year = self.version_date[0]
 
-        class AboutDialog(QtGui.QDialog):
+        class AboutDialog(QtWidgets.QDialog):
             def __init__(self, parent=None):
-                QtGui.QDialog.__init__(self, parent)
+                QtWidgets.QDialog.__init__(self, parent)
 
                 # Icon and title
                 self.setWindowIcon(parent.app_icon)
                 self.setWindowTitle("FlatCAM")
 
-                layout1 = QtGui.QVBoxLayout()
+                layout1 = QtWidgets.QVBoxLayout()
                 self.setLayout(layout1)
 
-                layout2 = QtGui.QHBoxLayout()
+                layout2 = QtWidgets.QHBoxLayout()
                 layout1.addLayout(layout2)
 
-                logo = QtGui.QLabel()
+                logo = QtWidgets.QLabel()
                 logo.setPixmap(QtGui.QPixmap('share/flatcam_icon256.png'))
                 layout2.addWidget(logo, stretch=0)
 
-                title = QtGui.QLabel(
+                title = QtWidgets.QLabel(
                     "<font size=8><B>FlatCAM</B></font><BR>"
                     "Version {} ({})<BR>"
                     "<BR>"
@@ -1153,15 +1056,15 @@ class App(QtCore.QObject):
                 )
                 layout2.addWidget(title, stretch=1)
 
-                layout3 = QtGui.QHBoxLayout()
+                layout3 = QtWidgets.QHBoxLayout()
                 layout1.addLayout(layout3)
                 layout3.addStretch()
-                okbtn = QtGui.QPushButton("Close")
+                okbtn = QtWidgets.QPushButton("Close")
                 layout3.addWidget(okbtn)
 
                 okbtn.clicked.connect(self.accept)
 
-        AboutDialog(self.ui).exec_()
+        AboutDialog(self.ui).exec()
 
     def on_file_savedefaults(self):
         """
@@ -1174,7 +1077,9 @@ class App(QtCore.QObject):
         self.save_defaults()
 
     def on_file_exit(self):
-        QtGui.qApp.quit()
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def save_defaults(self, silent=False):
         """
@@ -1393,36 +1298,32 @@ class App(QtCore.QObject):
             self.log.debug("on_toggle_units(): Same as options, so ignoring.")
             return
 
-        # Options to scale
-        dimensions = ['gerber_isotooldia', 'gerber_cutoutmargin', 'gerber_cutoutgapsize',
-                      'gerber_noncoppermargin', 'gerber_bboxmargin', 'excellon_drillz',
-                      'excellon_travelz', 'excellon_feedrate', 'excellon_toolchangez', 'excellon_tooldia', 'cncjob_tooldia',
-                      'geometry_cutz', 'geometry_travelz', 'geometry_feedrate',
-                      'geometry_cnctooldia', 'geometry_painttooldia', 'geometry_paintoverlap',
-                      'geometry_paintmargin']
-
-        def scale_options(sfactor):
-            for dim in dimensions:
-                self.options[dim] *= sfactor
-
+        # Scale only true dimensional options (never fractions like paintoverlap).
         # The scaling factor depending on choice of units.
-        factor = 1/25.4
+        factor = 1 / 25.4
         if self.options_form.units_radio.get_value().upper() == 'MM':
             factor = 25.4
 
         # Changing project units. Warn user.
-        msgbox = QtGui.QMessageBox()
+        msgbox = QtWidgets.QMessageBox()
         msgbox.setText("<B>Change project units ...</B>")
-        msgbox.setInformativeText("Changing the units of the project causes all geometrical "
-                                  "properties of all objects to be scaled accordingly. Continue?")
-        msgbox.setStandardButtons(QtGui.QMessageBox.Cancel | QtGui.QMessageBox.Ok)
-        msgbox.setDefaultButton(QtGui.QMessageBox.Ok)
+        msgbox.setInformativeText(
+            "Changing the units of the project scales geometry and dimensional "
+            "options (tool diameters, Z, feed). Unitless values (overlaps, passes) "
+            "are left unchanged. CNC G-code text is not rewritten — regenerate CNC "
+            "jobs after converting. Continue?"
+        )
+        msgbox.setStandardButtons(QtWidgets.QMessageBox.Cancel | QtWidgets.QMessageBox.Ok)
+        msgbox.setDefaultButton(QtWidgets.QMessageBox.Ok)
 
-        response = msgbox.exec_()
+        response = msgbox.exec()
 
-        if response == QtGui.QMessageBox.Ok:
+        if response == QtWidgets.QMessageBox.Ok:
             self.options_read_form()
-            scale_options(factor)
+            flatcam_defaults.scale_project_options(self.options, factor)
+            # Keep cutout tool dia in the dimensional set (was previously missed).
+            if "gerber_cutouttooldia" in self.options:
+                pass  # already scaled via DIMENSIONAL_OPTION_KEYS
             self.options_write_form()
             for obj in self.collection.get_list():
                 units = self.options_form.units_radio.get_value().upper()
@@ -1431,6 +1332,7 @@ class App(QtCore.QObject):
             if current is not None:
                 current.to_form()
             self.plot_all()
+            self.inform.emit("Converted units to %s" % self.options["units"])
         else:
             # Undo toggling
             self.toggle_units_ignore = True
@@ -1439,9 +1341,9 @@ class App(QtCore.QObject):
             else:
                 self.options_form.units_radio.set_value('MM')
             self.toggle_units_ignore = False
+            self.inform.emit("Unit change cancelled.")
 
         self.options_read_form()
-        self.inform.emit("Converted units to %s" % self.options["units"])
         #self.ui.units_label.setText("[" + self.options["units"] + "]")
         self.set_screen_units(self.options["units"])
 
@@ -1656,7 +1558,7 @@ class App(QtCore.QObject):
         try:
             App.log.debug('button=%d, x=%d, y=%d, xdata=%f, ydata=%f' % (
                 event.button, event.x, event.y, event.xdata, event.ydata))
-            modifiers = QtGui.QApplication.keyboardModifiers()
+            modifiers = QtWidgets.QApplication.keyboardModifiers()
             if modifiers == QtCore.Qt.ControlModifier:
                 self.clipboard.setText(self.defaults["point_clipboard_format"] % (event.xdata, event.ydata))
 
@@ -1721,17 +1623,7 @@ class App(QtCore.QObject):
         self.report_usage("on_fileopengerber")
         App.log.debug("on_fileopengerber()")
 
-        try:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Open Gerber",
-                                                         directory=self.get_last_folder())
-        except TypeError:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Open Gerber")
-
-        # The Qt methods above will return a QString which can cause problems later.
-        # So far json.dump() will fail to serialize it.
-        # TODO: Improve the serialization methods and remove this fix.
-        filename = str(filename)
-
+        filename = _qt_get_open_filename("Open Gerber", self.get_last_folder())
         if filename == "":
             self.inform.emit("Open cancelled.")
         else:
@@ -1748,17 +1640,7 @@ class App(QtCore.QObject):
         self.report_usage("on_fileopenexcellon")
         App.log.debug("on_fileopenexcellon()")
 
-        try:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Open Excellon",
-                                                         directory=self.get_last_folder())
-        except TypeError:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Open Excellon")
-
-        # The Qt methods above will return a QString which can cause problems later.
-        # So far json.dump() will fail to serialize it.
-        # TODO: Improve the serialization methods and remove this fix.
-        filename = str(filename)
-
+        filename = _qt_get_open_filename("Open Excellon", self.get_last_folder())
         if filename == "":
             self.inform.emit("Open cancelled.")
         else:
@@ -1775,17 +1657,7 @@ class App(QtCore.QObject):
         self.report_usage("on_fileopengcode")
         App.log.debug("on_fileopengcode()")
 
-        try:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Open G-Code",
-                                                         directory=self.get_last_folder())
-        except TypeError:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Open G-Code")
-
-        # The Qt methods above will return a QString which can cause problems later.
-        # So far json.dump() will fail to serialize it.
-        # TODO: Improve the serialization methods and remove this fix.
-        filename = str(filename)
-
+        filename = _qt_get_open_filename("Open G-Code", self.get_last_folder())
         if filename == "":
             self.inform.emit("Open cancelled.")
         else:
@@ -1802,17 +1674,7 @@ class App(QtCore.QObject):
         self.report_usage("on_file_openproject")
         App.log.debug("on_file_openproject()")
 
-        try:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Open Project",
-                                                         directory=self.get_last_folder())
-        except TypeError:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Open Project")
-
-        # The Qt methods above will return a QString which can cause problems later.
-        # So far json.dump() will fail to serialize it.
-        # TODO: Improve the serialization methods and remove this fix.
-        filename = str(filename)
-
+        filename = _qt_get_open_filename("Open Project", self.get_last_folder())
         if filename == "":
             self.inform.emit("Open cancelled.")
         else:
@@ -1835,33 +1697,27 @@ class App(QtCore.QObject):
         if obj is None:
             self.inform.emit("WARNING: No object selected.")
             msg = "Please Select a Geometry object to export"
-            msgbox = QtGui.QMessageBox()
+            msgbox = QtWidgets.QMessageBox()
             msgbox.setInformativeText(msg)
-            msgbox.setStandardButtons(QtGui.QMessageBox.Ok)
-            msgbox.setDefaultButton(QtGui.QMessageBox.Ok)
-            msgbox.exec_()
+            msgbox.setStandardButtons(QtWidgets.QMessageBox.Ok)
+            msgbox.setDefaultButton(QtWidgets.QMessageBox.Ok)
+            msgbox.exec()
             return
 
         # Check for more compatible types and add as required
         if (not isinstance(obj, FlatCAMGeometry) and not isinstance(obj, FlatCAMGerber) and not isinstance(obj, FlatCAMCNCjob)
             and not isinstance(obj, FlatCAMExcellon)):
             msg = "ERROR: Only Geometry, Gerber and CNCJob objects can be used."
-            msgbox = QtGui.QMessageBox()
+            msgbox = QtWidgets.QMessageBox()
             msgbox.setInformativeText(msg)
-            msgbox.setStandardButtons(QtGui.QMessageBox.Ok)
-            msgbox.setDefaultButton(QtGui.QMessageBox.Ok)
-            msgbox.exec_()
+            msgbox.setStandardButtons(QtWidgets.QMessageBox.Ok)
+            msgbox.setDefaultButton(QtWidgets.QMessageBox.Ok)
+            msgbox.exec()
             return
 
         name = self.collection.get_active().options["name"]
 
-        try:
-            filename = QtGui.QFileDialog.getSaveFileName(caption="Export SVG",
-                                                         directory=self.get_last_folder(), filter="*.svg")
-        except TypeError:
-            filename = QtGui.QFileDialog.getSaveFileName(caption="Export SVG")
-
-        filename = str(filename)
+        filename = _qt_get_save_filename("Export SVG", self.get_last_folder())
 
         if filename == "":
             self.inform.emit("Export SVG cancelled.")
@@ -1878,13 +1734,7 @@ class App(QtCore.QObject):
         self.report_usage("on_file_importsvg")
         App.log.debug("on_file_importsvg()")
 
-        try:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Import SVG",
-                                                         directory=self.get_last_folder())
-        except TypeError:
-            filename = QtGui.QFileDialog.getOpenFileName(caption="Import SVG")
-
-        filename = str(filename)
+        filename = _qt_get_open_filename("Import SVG", self.get_last_folder())
 
         if filename == "":
             self.inform.emit("Open cancelled.")
@@ -1921,13 +1771,7 @@ class App(QtCore.QObject):
 
         self.report_usage("on_file_saveprojectas")
 
-        try:
-            filename = QtGui.QFileDialog.getSaveFileName(caption="Save Project As ...",
-                                                         directory=self.get_last_folder())
-        except TypeError:
-            filename = QtGui.QFileDialog.getSaveFileName(caption="Save Project As ...")
-
-        filename = str(filename)
+        filename = _qt_get_save_filename("Save Project As ...", self.get_last_folder())
 
         try:
             f = open(filename, 'r')
@@ -1938,12 +1782,12 @@ class App(QtCore.QObject):
 
         msg = "File exists. Overwrite?"
         if exists:
-            msgbox = QtGui.QMessageBox()
+            msgbox = QtWidgets.QMessageBox()
             msgbox.setInformativeText(msg)
-            msgbox.setStandardButtons(QtGui.QMessageBox.Cancel | QtGui.QMessageBox.Ok)
-            msgbox.setDefaultButton(QtGui.QMessageBox.Cancel)
-            result = msgbox.exec_()
-            if result == QtGui.QMessageBox.Cancel:
+            msgbox.setStandardButtons(QtWidgets.QMessageBox.Cancel | QtWidgets.QMessageBox.Ok)
+            msgbox.setDefaultButton(QtWidgets.QMessageBox.Cancel)
+            result = msgbox.exec()
+            if result == QtWidgets.QMessageBox.Cancel:
                 return
 
         self.save_project(filename)
@@ -2146,9 +1990,10 @@ class App(QtCore.QObject):
                 raise
 
             if excellon_obj.is_empty():
+                # Object is not in the collection yet (still inside new_object init).
+                # Abort creation instead of trying to select/delete a missing item.
                 app_obj.inform.emit("[error] No geometry found in file: " + filename)
-                self.collection.set_active(excellon_obj.options["name"])
-                self.collection.delete_active()
+                raise ValueError("No geometry found in file: " + filename)
             #self.progress.emit(70)
 
         with self.proc_container.new("Opening Excellon."):
@@ -2156,7 +2001,13 @@ class App(QtCore.QObject):
             # Object name
             name = outname or filename.split('/')[-1].split('\\')[-1]
 
-            self.new_object("excellon", name, obj_init)
+            try:
+                self.new_object("excellon", name, obj_init)
+            except ValueError as e:
+                # Empty file / no geometry — already reported via inform.emit
+                App.log.warning(str(e))
+                self.progress.emit(0)
+                return
 
             # Register recent file
             self.file_opened.emit("excellon", filename)
@@ -2455,7 +2306,7 @@ class App(QtCore.QObject):
                 QtCore.QTimer.singleShot(timeout, report_quit)
 
             #### Block ####
-            loop.exec_()
+            loop.exec()
 
             # Restore exception management
             sys.excepthook = oeh
@@ -2477,7 +2328,7 @@ class App(QtCore.QObject):
         #
         #     if timeout is not None:
         #         QtCore.QTimer.singleShot(timeout, report_quit)
-        #     loop.exec_()
+        #     loop.exec()
         #
         #     if status['timed_out']:
         #         raise Exception('Timed out!')
@@ -2658,7 +2509,7 @@ class App(QtCore.QObject):
         #                        [pts[6], pts[7], pts[8]],
         #                        [pts[9], pts[10], pts[11]]]}
         #         cuts = cases[kwa['gaps']]
-        #         geo_obj.solid_geometry = cascaded_union([LineString(segment) for segment in cuts])
+        #         geo_obj.solid_geometry = unary_union([LineString(segment) for segment in cuts])
         #
         #     try:
         #         obj.app.new_object("geometry", name + "_cutout", geo_init_me)
@@ -4250,7 +4101,7 @@ class App(QtCore.QObject):
         # self.ui.recent.show()
 
     def setup_component_editor(self):
-        label = QtGui.QLabel("Choose an item from Project")
+        label = QtWidgets.QLabel("Choose an item from Project")
         label.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
         self.ui.selected_scroll_area.setWidget(label)
 
@@ -4389,9 +4240,9 @@ class App(QtCore.QObject):
 
 # def main():
 #
-#     app = QtGui.QApplication(sys.argv)
+#     app = QtWidgets.QApplication(sys.argv)
 #     fc = App()
-#     sys.exit(app.exec_())
+#     sys.exit(app.exec())
 #
 #
 # if __name__ == '__main__':

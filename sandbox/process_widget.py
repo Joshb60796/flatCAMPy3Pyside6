@@ -1,5 +1,7 @@
 import sys
-from PyQt4.QtGui import *
+from PySide6.QtWidgets import *
+from PySide6.QtGui import *
+from PySide6.QtCore import *
 
 app = QApplication(sys.argv)
 
@@ -17,4 +19,4 @@ halign.addWidget(message_label)
 
 top.show()
 
-sys.exit(app.exec_())
+sys.exit(app.exec())

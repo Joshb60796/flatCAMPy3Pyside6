@@ -2,7 +2,7 @@
 # FlatCAM: 2D Post-processing for Manufacturing            #
 ############################################################
 
-from PyQt4 import QtCore
+from PySide6 import QtCore
 
 
 class Worker(QtCore.QObject):

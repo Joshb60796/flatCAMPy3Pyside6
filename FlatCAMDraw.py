@@ -2,7 +2,7 @@
 # FlatCAM: 2D Post-processing for Manufacturing            #
 ############################################################
 
-from PyQt4 import QtGui, QtCore, Qt
+from PySide6 import QtCore, QtGui, QtWidgets
 import FlatCAMApp
 from camlib import *
 from FlatCAMTool import FlatCAMTool
@@ -11,13 +11,13 @@ from ObjectUI import LengthEntry, RadioSet
 from shapely.geometry import Polygon, LineString, Point, LinearRing
 from shapely.geometry import MultiPoint, MultiPolygon
 from shapely.geometry import box as shply_box
-from shapely.ops import cascaded_union, unary_union
+from shapely.ops import unary_union
 import shapely.affinity as affinity
 from shapely.wkt import loads as sloads
 from shapely.wkt import dumps as sdumps
 from shapely.geometry.base import BaseGeometry
 
-from numpy import arctan2, Inf, array, sqrt, pi, ceil, sin, cos, sign, dot
+from numpy import arctan2, inf as Inf, array, sqrt, pi, ceil, sin, cos, sign, dot
 from numpy.linalg import solve
 
 #from mpl_toolkits.axes_grid.anchored_artists import AnchoredDrawingArea
@@ -40,11 +40,11 @@ class BufferSelectionTool(FlatCAMTool):
         self.fcdraw = fcdraw
 
         ## Title
-        title_label = QtGui.QLabel("<font size=4><b>%s</b></font>" % self.toolName)
+        title_label = QtWidgets.QLabel("<font size=4><b>%s</b></font>" % self.toolName)
         self.layout.addWidget(title_label)
 
         ## Form Layout
-        form_layout = QtGui.QFormLayout()
+        form_layout = QtWidgets.QFormLayout()
         self.layout.addLayout(form_layout)
 
         ## Buffer distance
@@ -52,10 +52,10 @@ class BufferSelectionTool(FlatCAMTool):
         form_layout.addRow("Buffer distance:", self.buffer_distance_entry)
 
         ## Buttons
-        hlay = QtGui.QHBoxLayout()
+        hlay = QtWidgets.QHBoxLayout()
         self.layout.addLayout(hlay)
         hlay.addStretch()
-        self.buffer_button = QtGui.QPushButton("Buffer")
+        self.buffer_button = QtWidgets.QPushButton("Buffer")
         hlay.addWidget(self.buffer_button)
 
         self.layout.addStretch()
@@ -82,15 +82,15 @@ class PaintOptionsTool(FlatCAMTool):
         self.fcdraw = fcdraw
 
         ## Title
-        title_label = QtGui.QLabel("<font size=4><b>%s</b></font>" % self.toolName)
+        title_label = QtWidgets.QLabel("<font size=4><b>%s</b></font>" % self.toolName)
         self.layout.addWidget(title_label)
 
         ## Form Layout
-        form_layout = QtGui.QFormLayout()
+        form_layout = QtWidgets.QFormLayout()
         self.layout.addLayout(form_layout)
 
         # Tool dia
-        ptdlabel = QtGui.QLabel('Tool dia:')
+        ptdlabel = QtWidgets.QLabel('Tool dia:')
         ptdlabel.setToolTip(
             "Diameter of the tool to\n"
             "be used in the operation."
@@ -100,7 +100,7 @@ class PaintOptionsTool(FlatCAMTool):
         form_layout.addRow(ptdlabel, self.painttooldia_entry)
 
         # Overlap
-        ovlabel = QtGui.QLabel('Overlap:')
+        ovlabel = QtWidgets.QLabel('Overlap:')
         ovlabel.setToolTip(
             "How much (fraction) of the tool\n"
             "width to overlap each tool pass."
@@ -110,7 +110,7 @@ class PaintOptionsTool(FlatCAMTool):
         form_layout.addRow(ovlabel, self.paintoverlap_entry)
 
         # Margin
-        marginlabel = QtGui.QLabel('Margin:')
+        marginlabel = QtWidgets.QLabel('Margin:')
         marginlabel.setToolTip(
             "Distance by which to avoid\n"
             "the edges of the polygon to\n"
@@ -121,7 +121,7 @@ class PaintOptionsTool(FlatCAMTool):
         form_layout.addRow(marginlabel, self.paintmargin_entry)
 
         # Method
-        methodlabel = QtGui.QLabel('Method:')
+        methodlabel = QtWidgets.QLabel('Method:')
         methodlabel.setToolTip(
             "Algorithm to paint the polygon:<BR>"
             "<B>Standard</B>: Fixed step inwards.<BR>"
@@ -135,10 +135,10 @@ class PaintOptionsTool(FlatCAMTool):
         form_layout.addRow(methodlabel, self.paintmethod_combo)
 
         ## Buttons
-        hlay = QtGui.QHBoxLayout()
+        hlay = QtWidgets.QHBoxLayout()
         self.layout.addLayout(hlay)
         hlay.addStretch()
-        self.paint_button = QtGui.QPushButton("Paint")
+        self.paint_button = QtWidgets.QPushButton("Paint")
         hlay.addWidget(self.paint_button)
 
         self.layout.addStretch()
@@ -174,27 +174,27 @@ class DrawToolShape(object):
         """
         pts = []
 
-        ## Iterable: descend into each item.
-        try:
+        ## DrawToolShape: descend into .geo.
+        if isinstance(o, DrawToolShape):
+            return DrawToolShape.get_pts(o.geo)
+
+        # Python lists/tuples of shapes
+        if isinstance(o, (list, tuple)):
             for subo in o:
                 pts += DrawToolShape.get_pts(subo)
+            return pts
 
-        ## Non-iterable
-        except TypeError:
-
-            ## DrawToolShape: descend into .geo.
-            if isinstance(o, DrawToolShape):
-                pts += DrawToolShape.get_pts(o.geo)
-
-            ## Descend into .exerior and .interiors
-            elif type(o) == Polygon:
-                pts += DrawToolShape.get_pts(o.exterior)
-                for i in o.interiors:
-                    pts += DrawToolShape.get_pts(i)
-
-            ## Has .coords: list them.
-            else:
-                pts += list(o.coords)
+        # Shapely geometries — expand Multi* (Shapely 2 not directly iterable).
+        if isinstance(o, BaseGeometry):
+            for part in to_geometry_list(o):
+                gtype = getattr(part, "geom_type", None)
+                if gtype == "Polygon":
+                    pts += DrawToolShape.get_pts(part.exterior)
+                    for i in part.interiors:
+                        pts += DrawToolShape.get_pts(i)
+                elif gtype in ("LineString", "LinearRing", "Point"):
+                    pts += list(part.coords)
+            return pts
 
         return pts
 
@@ -688,7 +688,7 @@ class FlatCAMDraw(QtCore.QObject):
         self.axes = self.canvas.new_axes("draw")
 
         ### Drawing Toolbar ###
-        self.drawing_toolbar = QtGui.QToolBar("Draw Toolbar")
+        self.drawing_toolbar = QtWidgets.QToolBar("Draw Toolbar")
         self.drawing_toolbar.setDisabled(disabled)
         self.app.ui.addToolBar(self.drawing_toolbar)
 
@@ -716,7 +716,7 @@ class FlatCAMDraw(QtCore.QObject):
 
         ### Snap Toolbar ###
 
-        self.snap_toolbar = QtGui.QToolBar("Grid Toolbar")
+        self.snap_toolbar = QtWidgets.QToolBar("Grid Toolbar")
         self.grid_snap_btn = self.snap_toolbar.addAction(QtGui.QIcon('share/grid32.png'), 'Snap to grid')
         self.grid_gap_x_entry = FCEntry()
 
@@ -740,7 +740,7 @@ class FlatCAMDraw(QtCore.QObject):
         self.app.ui.addToolBar(self.snap_toolbar)
 
         ### Application menu ###
-        self.menu = QtGui.QMenu("Drawing")
+        self.menu = QtWidgets.QMenu("Drawing")
         self.app.ui.menu.insertMenu(self.app.ui.menutoolaction, self.menu)
         # self.select_menuitem = self.menu.addAction(QtGui.QIcon('share:pointer16.png'), "Select 'Esc'")
         # self.add_circle_menuitem = self.menu.addAction(QtGui.QIcon('share:circle16.png'), 'Add Circle')
@@ -921,18 +921,39 @@ class FlatCAMDraw(QtCore.QObject):
     def cutpath(self):
         selected = self.get_selected()
         tools = selected[1:]
-        toolgeo = cascaded_union([shp.geo for shp in tools])
+        toolgeo = unary_union([shp.geo for shp in tools])
 
         target = selected[0]
-        if type(target.geo) == Polygon:
-            for ring in poly2rings(target.geo):
-                self.add_shape(DrawToolShape(ring.difference(toolgeo)))
+        geo = target.geo
+        handled = False
+
+        # Polygon / MultiPolygon (Shapely 2: expand via each_polygon)
+        polys = list(each_polygon(geo))
+        if polys:
+            for poly in polys:
+                for ring in poly2rings(poly):
+                    diff = ring.difference(toolgeo)
+                    for part in each_linear(diff):
+                        self.add_shape(DrawToolShape(part))
             self.delete_shape(target)
-        elif type(target.geo) == LineString or type(target.geo) == LinearRing:
-            self.add_shape(DrawToolShape(target.geo.difference(toolgeo)))
-            self.delete_shape(target)
+            handled = True
         else:
-            self.app.log.warning("Not implemented.")
+            # LineString / LinearRing / MultiLineString
+            lines = list(each_linear(geo))
+            if lines:
+                for lin in lines:
+                    diff = lin.difference(toolgeo)
+                    parts = list(each_linear(diff))
+                    if parts:
+                        for part in parts:
+                            self.add_shape(DrawToolShape(part))
+                    elif not getattr(diff, "is_empty", True):
+                        self.add_shape(DrawToolShape(diff))
+                self.delete_shape(target)
+                handled = True
+
+        if not handled:
+            self.app.log.warning("Not implemented. cutpath geometry type: %r" % type(geo))
 
         self.replot()
 
@@ -1012,7 +1033,7 @@ class FlatCAMDraw(QtCore.QObject):
         :return: None
         """
         # Selection with left mouse button
-        if self.active_tool is not None and event.button is 1:
+        if self.active_tool is not None and event.button == 1:
             # Dispatch event to active_tool
             msg = self.active_tool.click(self.snap(event.xdata, event.ydata))
             self.app.inform.emit(msg)
@@ -1219,43 +1240,52 @@ class FlatCAMDraw(QtCore.QObject):
         if geometry is None:
             geometry = self.active_tool.geometry
 
-        try:
+        ## DrawToolShape
+        if isinstance(geometry, DrawToolShape):
+            return self.plot_shape(geometry=geometry.geo,
+                                   linespec=linespec,
+                                   linewidth=linewidth,
+                                   animated=animated)
+
+        # Nested lists
+        if isinstance(geometry, (list, tuple)):
             for geo in geometry:
                 plot_elements += self.plot_shape(geometry=geo,
                                                  linespec=linespec,
                                                  linewidth=linewidth,
                                                  animated=animated)
+            return plot_elements
 
-        ## Non-iterable
-        except TypeError:
-
-            ## DrawToolShape
-            if isinstance(geometry, DrawToolShape):
-                plot_elements += self.plot_shape(geometry=geometry.geo,
-                                                 linespec=linespec,
-                                                 linewidth=linewidth,
-                                                 animated=animated)
-
-            ## Polygon: Dscend into exterior and each interior.
-            if type(geometry) == Polygon:
-                plot_elements += self.plot_shape(geometry=geometry.exterior,
-                                                 linespec=linespec,
-                                                 linewidth=linewidth,
-                                                 animated=animated)
-                plot_elements += self.plot_shape(geometry=geometry.interiors,
-                                                 linespec=linespec,
-                                                 linewidth=linewidth,
-                                                 animated=animated)
-
-            if type(geometry) == LineString or type(geometry) == LinearRing:
-                x, y = geometry.coords.xy
-                element, = self.axes.plot(x, y, linespec, linewidth=linewidth, animated=animated)
-                plot_elements.append(element)
-
-            if type(geometry) == Point:
-                x, y = geometry.coords.xy
-                element, = self.axes.plot(x, y, 'bo', linewidth=linewidth, animated=animated)
-                plot_elements.append(element)
+        # Shapely geometries (expand Multi* — not iterable in Shapely 2)
+        if isinstance(geometry, BaseGeometry):
+            for part in to_geometry_list(geometry):
+                gtype = getattr(part, "geom_type", None)
+                if gtype == "Polygon":
+                    plot_elements += self.plot_shape(
+                        geometry=part.exterior,
+                        linespec=linespec,
+                        linewidth=linewidth,
+                        animated=animated,
+                    )
+                    for interior in part.interiors:
+                        plot_elements += self.plot_shape(
+                            geometry=interior,
+                            linespec=linespec,
+                            linewidth=linewidth,
+                            animated=animated,
+                        )
+                elif gtype in ("LineString", "LinearRing"):
+                    x, y = part.coords.xy
+                    element, = self.axes.plot(
+                        x, y, linespec, linewidth=linewidth, animated=animated
+                    )
+                    plot_elements.append(element)
+                elif gtype == "Point":
+                    x, y = part.coords.xy
+                    element, = self.axes.plot(
+                        x, y, 'bo', linewidth=linewidth, animated=animated
+                    )
+                    plot_elements.append(element)
 
         return plot_elements
 
@@ -1409,7 +1439,7 @@ class FlatCAMDraw(QtCore.QObject):
         :return: None.
         """
 
-        results = cascaded_union([t.geo for t in self.get_selected()])
+        results = unary_union([t.geo for t in self.get_selected()])
 
         # Delete originals.
         for_deletion = [s for s in self.get_selected()]
@@ -1452,7 +1482,7 @@ class FlatCAMDraw(QtCore.QObject):
     def subtract(self):
         selected = self.get_selected()
         tools = selected[1:]
-        toolgeo = cascaded_union([shp.geo for shp in tools])
+        toolgeo = unary_union([shp.geo for shp in tools])
         result = selected[0].geo.difference(toolgeo)
 
         self.delete_shape(selected[0])
@@ -1471,7 +1501,7 @@ class FlatCAMDraw(QtCore.QObject):
             self.app.inform.emit("[warning] Invalid distance for buffering.")
             return
 
-        pre_buffer = cascaded_union([t.geo for t in selected])
+        pre_buffer = unary_union([t.geo for t in selected])
         results = pre_buffer.buffer(buf_distance)
         self.add_shape(DrawToolShape(results))
 
@@ -1496,15 +1526,9 @@ class FlatCAMDraw(QtCore.QObject):
         results = []
 
         def recurse(geo):
-            try:
-                for subg in geo:
-                    for subsubg in recurse(subg):
-                        yield subsubg
-            except TypeError:
-                if isinstance(geo, Polygon):
-                    yield geo
-
-            raise StopIteration
+            for part in to_geometry_list(geo):
+                if part.geom_type == "Polygon":
+                    yield part
 
         for geo in selected:
 
@@ -1524,7 +1548,7 @@ class FlatCAMDraw(QtCore.QObject):
                 if cp is not None:
                     local_results += list(cp.get_objects())
 
-                results.append(cascaded_union(local_results))
+                results.append(unary_union(local_results))
 
         # This is a dirty patch:
         for r in results:
@@ -1542,4 +1566,10 @@ def mag(vec):
 
 
 def poly2rings(poly):
-    return [poly.exterior] + [interior for interior in poly.interiors]
+    """Return exterior + interiors of a Polygon (or all polys in MultiPolygon)."""
+    rings = []
+    for p in each_polygon(poly):
+        if p.exterior is not None and not p.exterior.is_empty:
+            rings.append(p.exterior)
+        rings.extend([interior for interior in p.interiors if not interior.is_empty])
+    return rings

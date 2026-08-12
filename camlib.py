@@ -6,7 +6,7 @@
 #import traceback
 
 from io import StringIO
-from numpy import arctan2, Inf, array, sqrt, pi, ceil, sin, cos, dot, float32, \
+from numpy import arctan2, inf as Inf, array, sqrt, pi, ceil, sin, cos, dot, float32, \
     transpose
 from numpy.linalg import solve, norm
 from matplotlib.figure import Figure
@@ -27,7 +27,7 @@ from rtree import index as rtindex
 from shapely.geometry import Polygon, LineString, Point, LinearRing
 from shapely.geometry import MultiPoint, MultiPolygon
 from shapely.geometry import box as shply_box
-from shapely.ops import cascaded_union, unary_union
+from shapely.ops import unary_union
 import shapely.affinity as affinity
 from shapely.wkt import loads as sloads
 from shapely.wkt import dumps as sdumps
@@ -66,13 +66,113 @@ class ParseError(Exception):
     pass
 
 
+def to_geometry_list(geometry):
+    """
+    Normalize Shapely geometry (or nested lists) into a flat list of
+    single-part geometries.
+
+    Shapely 2.x no longer makes Multi* geometries directly iterable;
+    use this helper instead of ``iter(geometry)`` / ``list(geometry)``.
+    """
+    if geometry is None:
+        return []
+    if isinstance(geometry, BaseGeometry):
+        if geometry.is_empty:
+            return []
+        # MultiPolygon, GeometryCollection, etc.
+        if hasattr(geometry, "geoms"):
+            result = []
+            for part in geometry.geoms:
+                result.extend(to_geometry_list(part))
+            return result
+        return [geometry]
+    if isinstance(geometry, (list, tuple)):
+        result = []
+        for part in geometry:
+            result.extend(to_geometry_list(part))
+        return result
+    # Fallback for other sequences
+    try:
+        result = []
+        for part in geometry:
+            result.extend(to_geometry_list(part))
+        return result
+    except TypeError:
+        return [geometry]
+
+
+def geom_type_of(obj):
+    """Return Shapely geom_type string, or None if not a geometry."""
+    return getattr(obj, "geom_type", None)
+
+
+def is_polygon(obj):
+    return geom_type_of(obj) == "Polygon"
+
+
+def is_linear(obj):
+    return geom_type_of(obj) in ("LineString", "LinearRing")
+
+
+def is_point(obj):
+    return geom_type_of(obj) == "Point"
+
+
+def each_polygon(geometry):
+    """Yield every Polygon in geometry (lists / Multi* expanded)."""
+    for g in to_geometry_list(geometry):
+        if is_polygon(g):
+            yield g
+
+
+def each_linear(geometry):
+    """Yield every LineString/LinearRing in geometry (lists / Multi* expanded)."""
+    for g in to_geometry_list(geometry):
+        if is_linear(g):
+            yield g
+
+
+def linear_endpoints(obj):
+    """
+    Return [first, last] coordinate pairs for R-tree indexing of paths.
+
+    Accepts LineString/LinearRing/Point, or multi-part/list (endpoints of each
+    linear part). Empty geometries return [].
+    """
+    if obj is None:
+        return []
+    gtype = geom_type_of(obj)
+    if gtype in ("LineString", "LinearRing"):
+        coords = list(obj.coords)
+        if not coords:
+            return []
+        return [coords[0], coords[-1]]
+    if gtype == "Point":
+        return [obj.coords[0]]
+    pts = []
+    for part in to_geometry_list(obj):
+        pts.extend(linear_endpoints(part))
+    return pts
+
+
+def insert_polygon_rings(storage, polygon):
+    """Insert exterior + interiors of a Polygon into an R-tree storage."""
+    if not is_polygon(polygon) or polygon.is_empty:
+        return
+    if polygon.exterior is not None and not polygon.exterior.is_empty:
+        storage.insert(polygon.exterior)
+    for interior in polygon.interiors:
+        if not interior.is_empty:
+            storage.insert(interior)
+
+
 class Geometry(object):
     """
     Base geometry class.
     """
 
     defaults = {
-        "init_units": 'in'
+        "init_units": 'mm'  # KiCad / metric project default
     }
 
     def __init__(self):
@@ -188,14 +288,14 @@ class Geometry(object):
         flat_geometry = self.flatten(pathonly=True)
         log.debug("%d paths" % len(flat_geometry))
         polygon=Polygon(points)
-        toolgeo=cascaded_union(polygon)
+        toolgeo=unary_union(polygon)
         diffs=[]
         for target in flat_geometry:
-            if type(target) == LineString or type(target) == LinearRing:
+            if is_linear(target):
                 diffs.append(target.difference(toolgeo))
             else:
                 log.warning("Not implemented.")
-        self.solid_geometry=cascaded_union(diffs)
+        self.solid_geometry=unary_union(diffs)
 
     def bounds(self):
         """
@@ -212,7 +312,7 @@ class Geometry(object):
             if len(self.solid_geometry) == 0:
                 log.debug('solid_geometry is empty []')
                 return 0, 0, 0, 0
-            return cascaded_union(self.solid_geometry).bounds
+            return unary_union(self.solid_geometry).bounds
         else:
             return self.solid_geometry.bounds
 
@@ -235,20 +335,36 @@ class Geometry(object):
         if geoset is None:
             geoset = self.solid_geometry
 
-        try:  # Iterable
+        if geoset is None:
+            return None
+
+        # Python lists/tuples: recurse into each entry (may nest).
+        if isinstance(geoset, (list, tuple)):
             for sub_geo in geoset:
                 p = self.find_polygon(point, geoset=sub_geo)
                 if p is not None:
                     return p
+            return None
 
-        except TypeError:  # Non-iterable
-
-            try:  # Implements .contains()
+        # Multi-part / single-part geometries (Shapely 2 safe).
+        if isinstance(geoset, BaseGeometry):
+            # Prefer the most specific polygon that contains the point.
+            for poly in each_polygon(geoset):
+                try:
+                    if poly.contains(Point(point)):
+                        return poly
+                except Exception:
+                    continue
+            # Fall back: whole multipolygon may contain the point without
+            # a single-part match if topology is odd.
+            try:
                 if geoset.contains(Point(point)):
-                    return geoset
-
-            except AttributeError:  # Does not implement .contains()
+                    # Return first polygon if multi, else the geometry itself.
+                    polys = list(each_polygon(geoset))
+                    return polys[0] if polys else geoset
+            except Exception:
                 return None
+            return None
 
         return None
 
@@ -259,15 +375,8 @@ class Geometry(object):
         if geometry is None:
             geometry = self.solid_geometry
 
-        ## If iterable, expand recursively.
-        try:
-            for geo in geometry:
-                interiors.extend(self.get_interiors(geometry=geo))
-
-        ## Not iterable, get the exterior if polygon.
-        except TypeError:
-            if type(geometry) == Polygon:
-                interiors.extend(geometry.interiors)
+        for poly in each_polygon(geometry):
+            interiors.extend(list(poly.interiors))
 
         return interiors
 
@@ -286,24 +395,23 @@ class Geometry(object):
         if geometry is None:
             geometry = self.solid_geometry
 
-        ## If iterable, expand recursively.
-        try:
-            for geo in geometry:
-                exteriors.extend(self.get_exteriors(geometry=geo))
-
-        ## Not iterable, get the exterior if polygon.
-        except TypeError:
-            if type(geometry) == Polygon:
-                exteriors.append(geometry.exterior)
+        for poly in each_polygon(geometry):
+            if poly.exterior is not None and not poly.exterior.is_empty:
+                exteriors.append(poly.exterior)
 
         return exteriors
 
     def flatten(self, geometry=None, reset=True, pathonly=False):
         """
         Creates a list of non-iterable linear geometry objects.
-        Polygons are expanded into its exterior and interiors if specified.
+        Polygons are expanded into exterior and interiors if pathonly is set.
 
-        Results are placed in self.flat_geoemtry
+        Results are placed in ``self.flat_geometry``.
+
+        Shapely 2 note: MultiPolygon / MultiLineString / GeometryCollection
+        are not directly iterable; this uses ``to_geometry_list`` so multi-part
+        geometries are expanded instead of being stored whole (which later
+        breaks ``.coords`` access).
 
         :param geometry: Shapely type or list or list of list of such.
         :param reset: Clears the contents of self.flat_geometry.
@@ -316,22 +424,24 @@ class Geometry(object):
         if reset:
             self.flat_geometry = []
 
-        ## If iterable, expand recursively.
-        try:
-            for geo in geometry:
-                self.flatten(geometry=geo,
-                             reset=False,
-                             pathonly=pathonly)
-
-        ## Not iterable, do the actual indexing and add.
-        except TypeError:
-            if pathonly and type(geometry) == Polygon:
-                self.flat_geometry.append(geometry.exterior)
-                self.flatten(geometry=geometry.interiors,
-                             reset=False,
-                             pathonly=True)
+        for geo in to_geometry_list(geometry):
+            gtype = getattr(geo, "geom_type", None)
+            if pathonly and gtype == "Polygon":
+                # Exterior is a LinearRing; keep as path for G-code.
+                if not geo.exterior.is_empty:
+                    self.flat_geometry.append(geo.exterior)
+                for interior in geo.interiors:
+                    if not interior.is_empty:
+                        self.flat_geometry.append(interior)
+            elif pathonly and gtype in ("LineString", "LinearRing", "Point"):
+                if not geo.is_empty:
+                    self.flat_geometry.append(geo)
+            elif pathonly:
+                # Unexpected type under pathonly (should already be exploded).
+                log.warning("flatten(pathonly): skipping geometry type %s" % gtype)
             else:
-                self.flat_geometry.append(geometry)
+                if not getattr(geo, "is_empty", False):
+                    self.flat_geometry.append(geo)
 
         return self.flat_geometry
 
@@ -439,14 +549,14 @@ class Geometry(object):
             self.solid_geometry = []
 
         if type(self.solid_geometry) is list:
-            # self.solid_geometry.append(cascaded_union(geos))
+            # self.solid_geometry.append(unary_union(geos))
             if type(geos) is list:
                 self.solid_geometry += geos
             else:
                 self.solid_geometry.append(geos)
         else:  # It's shapely geometry
-            # self.solid_geometry = cascaded_union([self.solid_geometry,
-            #                                       cascaded_union(geos)])
+            # self.solid_geometry = unary_union([self.solid_geometry,
+            #                                       unary_union(geos)])
             self.solid_geometry = [self.solid_geometry, geos]
 
     def size(self):
@@ -491,55 +601,36 @@ class Geometry(object):
         """
 
         log.debug("camlib.clear_polygon()")
-        assert type(polygon) == Polygon or type(polygon) == MultiPolygon, \
+        gtype = geom_type_of(polygon)
+        assert gtype in ("Polygon", "MultiPolygon"), \
             "Expected a Polygon or MultiPolygon, got %s" % type(polygon)
 
         ## The toolpaths
-        # Index first and last points in paths
+        # Index first and last points in paths (Shapely 2 safe).
         def get_pts(o):
-            return [o.coords[0], o.coords[-1]]
+            return linear_endpoints(o)
         geoms = FlatCAMRTreeStorage()
         geoms.get_points = get_pts
 
         # Can only result in a Polygon or MultiPolygon
         # NOTE: The resulting polygon can be "empty".
         current = polygon.buffer(-tooldia / 2.0)
-        if current.area == 0:
-            # Otherwise, trying to to insert current.exterior == None
+        if current.is_empty or current.area == 0:
+            # Otherwise, trying to insert current.exterior == None
             # into the FlatCAMStorage will fail.
             return None
 
-        # current can be a MultiPolygon
-        try:
-            for p in current:
-                geoms.insert(p.exterior)
-                for i in p.interiors:
-                    geoms.insert(i)
-
-        # Not a Multipolygon. Must be a Polygon
-        except TypeError:
-            geoms.insert(current.exterior)
-            for i in current.interiors:
-                geoms.insert(i)
+        # current can be a MultiPolygon (Shapely 2: not directly iterable).
+        for p in each_polygon(current):
+            insert_polygon_rings(geoms, p)
 
         while True:
 
             # Can only result in a Polygon or MultiPolygon
             current = current.buffer(-tooldia * (1 - overlap))
-            if current.area > 0:
-
-                # current can be a MultiPolygon
-                try:
-                    for p in current:
-                        geoms.insert(p.exterior)
-                        for i in p.interiors:
-                            geoms.insert(i)
-
-                # Not a Multipolygon. Must be a Polygon
-                except TypeError:
-                    geoms.insert(current.exterior)
-                    for i in current.interiors:
-                        geoms.insert(i)
+            if (not current.is_empty) and current.area > 0:
+                for p in each_polygon(current):
+                    insert_polygon_rings(geoms, p)
             else:
                 break
 
@@ -578,14 +669,16 @@ class Geometry(object):
         radius = tooldia / 2 * (1 - overlap)
 
         ## The toolpaths
-        # Index first and last points in paths
+        # Index first and last points in paths (Shapely 2 safe).
         def get_pts(o):
-            return [o.coords[0], o.coords[-1]]
+            return linear_endpoints(o)
         geoms = FlatCAMRTreeStorage()
         geoms.get_points = get_pts
 
         # Path margin
         path_margin = polygon.buffer(-tooldia / 2)
+        if path_margin.is_empty:
+            return None
 
         # Estimate good seedpoint if not provided.
         if seedpoint is None:
@@ -601,27 +694,16 @@ class Geometry(object):
             if path.is_empty:
                 break
             else:
-                #geoms.append(path)
-                #geoms.insert(path)
-                # path can be a collection of paths.
-                try:
-                    for p in path:
-                        geoms.insert(p)
-                except TypeError:
-                    geoms.insert(path)
+                # path can be MultiLineString / GeometryCollection (Shapely 2).
+                for p in each_linear(path):
+                    geoms.insert(p)
 
             radius += tooldia * (1 - overlap)
 
         # Clean inside edges (contours) of the original polygon
         if contour:
-            outer_edges = [x.exterior for x in autolist(polygon.buffer(-tooldia / 2))]
-            inner_edges = []
-            for x in autolist(polygon.buffer(-tooldia / 2)):  # Over resulting polygons
-                for y in x.interiors:  # Over interiors of each polygon
-                    inner_edges.append(y)
-            #geoms += outer_edges + inner_edges
-            for g in outer_edges + inner_edges:
-                geoms.insert(g)
+            for x in each_polygon(polygon.buffer(-tooldia / 2)):
+                insert_polygon_rings(geoms, x)
 
         # Optimization connect touching paths
         # log.debug("Connecting paths...")
@@ -655,9 +737,9 @@ class Geometry(object):
         log.debug("camlib.clear_polygon3()")
 
         ## The toolpaths
-        # Index first and last points in paths
+        # Index first and last points in paths (Shapely 2 safe).
         def get_pts(o):
-            return [o.coords[0], o.coords[-1]]
+            return linear_endpoints(o)
 
         geoms = FlatCAMRTreeStorage()
         geoms.get_points = get_pts
@@ -684,17 +766,18 @@ class Geometry(object):
 
         # Trim to the polygon
         margin_poly = polygon.buffer(-tooldia / 2)
+        if margin_poly.is_empty:
+            return None
         lines_trimmed = linesgeo.intersection(margin_poly)
 
-        # Add lines to storage
-        for line in lines_trimmed:
+        # Add lines to storage (MultiLineString is not iterable in Shapely 2).
+        for line in each_linear(lines_trimmed):
             geoms.insert(line)
 
         # Add margin (contour) to storage
         if contour:
-            geoms.insert(margin_poly.exterior)
-            for ints in margin_poly.interiors:
-                geoms.insert(ints)
+            for poly in each_polygon(margin_poly):
+                insert_polygon_rings(geoms, poly)
 
         # Optimization: Reduce lifts
         if connect:
@@ -748,9 +831,9 @@ class Geometry(object):
 
         # Assuming geolist is a flat list of flat elements
 
-        ## Index first and last points in paths
+        ## Index first and last points in paths (Shapely 2 safe).
         def get_pts(o):
-            return [o.coords[0], o.coords[-1]]
+            return linear_endpoints(o)
 
         # storage = FlatCAMRTreeStorage()
         # storage.get_points = get_pts
@@ -771,7 +854,7 @@ class Geometry(object):
         pt, geo = storage.nearest(current_pt)
         storage.remove(geo)
         geo = LineString(geo)
-        current_pt = geo.coords[-1]
+        current_pt = list(geo.coords)[-1]
         try:
             while True:
                 path_count += 1
@@ -784,8 +867,9 @@ class Geometry(object):
                 # If last point in geometry is the nearest
                 # then reverse coordinates.
                 # but prefer the first one if last == first
+                # Shapely 2: LineString.coords is immutable — rebuild geometry.
                 if pt != candidate.coords[0] and pt == candidate.coords[-1]:
-                    candidate.coords = list(candidate.coords)[::-1]
+                    candidate = LineString(list(candidate.coords)[::-1])
 
                 # Straight line from current_pt to pt.
                 # Is the toolpath inside the geometry?
@@ -796,7 +880,7 @@ class Geometry(object):
                     #log.debug("Walk to path #%d is inside. Joining." % path_count)
 
                     # Completely inside. Append...
-                    geo.coords = list(geo.coords) + list(candidate.coords)
+                    geo = LineString(list(geo.coords) + list(candidate.coords))
                     # try:
                     #     last = optimized_paths[-1]
                     #     last.coords = list(last.coords) + list(geo.coords)
@@ -838,7 +922,7 @@ class Geometry(object):
 
         ## Index first and last points in paths
         def get_pts(o):
-            return [o.coords[0], o.coords[-1]]
+            return linear_endpoints(o)
         #
         # storage = FlatCAMRTreeStorage()
         # storage.get_points = get_pts
@@ -860,56 +944,59 @@ class Geometry(object):
 
                 #print "geo is", geo
 
-                _, left = storage.nearest(geo.coords[0])
+                _, left = storage.nearest(list(geo.coords)[0])
                 #print "left is", left
 
                 # If left touches geo, remove left from original
                 # storage and append to geo.
-                if type(left) == LineString:
+                # Only LineString paths are chained; LinearRings stay separate
+                # (they share endpoints without being continuations of open paths).
+                # Shapely 2: LineString.coords is immutable — rebuild with LineString(...).
+                if geom_type_of(left) == "LineString":
                     if left.coords[0] == geo.coords[0]:
                         storage.remove(left)
-                        geo.coords = list(geo.coords)[::-1] + list(left.coords)
+                        geo = LineString(list(geo.coords)[::-1] + list(left.coords))
                         continue
 
                     if left.coords[-1] == geo.coords[0]:
                         storage.remove(left)
-                        geo.coords = list(left.coords) + list(geo.coords)
+                        geo = LineString(list(left.coords) + list(geo.coords))
                         continue
 
                     if left.coords[0] == geo.coords[-1]:
                         storage.remove(left)
-                        geo.coords = list(geo.coords) + list(left.coords)
+                        geo = LineString(list(geo.coords) + list(left.coords))
                         continue
 
                     if left.coords[-1] == geo.coords[-1]:
                         storage.remove(left)
-                        geo.coords = list(geo.coords) + list(left.coords)[::-1]
+                        geo = LineString(list(geo.coords) + list(left.coords)[::-1])
                         continue
 
-                _, right = storage.nearest(geo.coords[-1])
+                _, right = storage.nearest(list(geo.coords)[-1])
                 #print "right is", right
 
-                # If right touches geo, remove left from original
+                # If right touches geo, remove right from original
                 # storage and append to geo.
-                if type(right) == LineString:
+                if geom_type_of(right) == "LineString":
                     if right.coords[0] == geo.coords[-1]:
                         storage.remove(right)
-                        geo.coords = list(geo.coords) + list(right.coords)
+                        geo = LineString(list(geo.coords) + list(right.coords))
                         continue
 
                     if right.coords[-1] == geo.coords[-1]:
                         storage.remove(right)
-                        geo.coords = list(geo.coords) + list(right.coords)[::-1]
+                        geo = LineString(list(geo.coords) + list(right.coords)[::-1])
                         continue
 
                     if right.coords[0] == geo.coords[0]:
                         storage.remove(right)
-                        geo.coords = list(geo.coords)[::-1] + list(right.coords)
+                        geo = LineString(list(geo.coords)[::-1] + list(right.coords))
                         continue
 
                     if right.coords[-1] == geo.coords[0]:
                         storage.remove(right)
-                        geo.coords = list(left.coords) + list(geo.coords)
+                        geo = LineString(list(right.coords) + list(geo.coords))
                         continue
 
                 # right is either a LinearRing or it does not connect
@@ -917,10 +1004,10 @@ class Geometry(object):
                 # with right as geo.
                 storage.remove(right)
 
-                if type(right) == LinearRing:
+                if geom_type_of(right) == "LinearRing":
                     optimized_geometry.insert(right)
                 else:
-                    # Cannot exteng geo any further. Put it away.
+                    # Cannot extend geo any further. Put it away.
                     optimized_geometry.insert(geo)
 
                     # Continue with right.
@@ -998,7 +1085,7 @@ class Geometry(object):
 
         :return: None
         """
-        self.solid_geometry = [cascaded_union(self.solid_geometry)]
+        self.solid_geometry = [unary_union(self.solid_geometry)]
 
     def export_svg(self, scale_factor=0.00):
         """
@@ -1007,7 +1094,7 @@ class Geometry(object):
         :return: SVG Element
         """
         # Make sure we see a Shapely Geometry class and not a list
-        geom = cascaded_union(self.flatten())
+        geom = unary_union(self.flatten())
 
         # scale_factor is a multiplication factor for the SVG stroke-width used within shapely's svg export
 
@@ -1401,13 +1488,13 @@ class ApertureMacro:
             if r <= 0:
                 break
             ring = Point((x, y)).buffer(r).exterior.buffer(thickness/2.0)
-            result = cascaded_union([result, ring])
+            result = unary_union([result, ring])
             i += 1
 
         ## Crosshair
         hor = LineString([(x - cross_len, y), (x + cross_len, y)]).buffer(cross_th/2.0, cap_style=2)
         ver = LineString([(x, y-cross_len), (x, y + cross_len)]).buffer(cross_th/2.0, cap_style=2)
-        result = cascaded_union([result, hor, ver])
+        result = unary_union([result, hor, ver])
 
         return {"pol": 1, "geometry": result}
 
@@ -1603,7 +1690,7 @@ class Gerber (Geometry):
         # Optional start with G02 or G03, optional end with D01 or D02 with
         # optional coordinates but at least one in any order.
         self.circ_re = re.compile(r'^(?:G0?([23]))?(?=.*X([\+-]?\d+))?(?=.*Y([\+-]?\d+))' +
-                                  '?(?=.*I([\+-]?\d+))?(?=.*J([\+-]?\d+))?[XYIJ][^D]*(?:D0([12]))?\*$')
+                                  r'?(?=.*I([\+-]?\d+))?(?=.*J([\+-]?\d+))?[XYIJ][^D]*(?:D0([12]))?\*$')
 
         # G01/2/3 Occurring without coordinates
         self.interp_re = re.compile(r'^(?:G0?([123]))\*')
@@ -1864,7 +1951,7 @@ class Gerber (Geometry):
         path = []
 
         # Polygons are stored here until there is a change in polarity.
-        # Only then they are combined via cascaded_union and added or
+        # Only then they are combined via unary_union and added or
         # subtracted from solid_geometry. This is ~100 times faster than
         # applyng a union for every new polygon.
         poly_buffer = []
@@ -2296,7 +2383,7 @@ class Gerber (Geometry):
                     # so it can be processed by FlatCAM.
                     # But first test to see if the aperture type is "aperture macro". In that case
                     # we should not test for "size" key as it does not exist in this case.
-                    if self.apertures[current_aperture]["type"] is not "AM":
+                    if self.apertures[current_aperture]["type"] != "AM":
                         if self.apertures[current_aperture]["size"] == 0:
                             self.apertures[current_aperture]["size"] = 0.0000001
                     log.debug(self.apertures[current_aperture])
@@ -2342,9 +2429,9 @@ class Gerber (Geometry):
                     # TODO: Remove when bug fixed
                     if len(poly_buffer) > 0:
                         if current_polarity == 'D':
-                            self.solid_geometry = self.solid_geometry.union(cascaded_union(poly_buffer))
+                            self.solid_geometry = self.solid_geometry.union(unary_union(poly_buffer))
                         else:
-                            self.solid_geometry = self.solid_geometry.difference(cascaded_union(poly_buffer))
+                            self.solid_geometry = self.solid_geometry.difference(unary_union(poly_buffer))
                         poly_buffer = []
 
                     current_polarity = match.group(1)
@@ -2425,7 +2512,7 @@ class Gerber (Geometry):
                 log.warn("Union(buffer) done.")
             else:
                 log.debug("Union by union()...")
-                new_poly = cascaded_union(poly_buffer)
+                new_poly = unary_union(poly_buffer)
                 new_poly = new_poly.buffer(0)
                 log.warn("Union done.")
             if current_polarity == 'D':
@@ -2476,7 +2563,7 @@ class Gerber (Geometry):
                 p2 = Point(loc[0], loc[1] - 0.5 * (height - width))
                 c1 = p1.buffer(width * 0.5)
                 c2 = p2.buffer(width * 0.5)
-            return cascaded_union([c1, c2]).convex_hull
+            return unary_union([c1, c2]).convex_hull
 
         if aperture['type'] == 'P':  # Regular polygon
             loc = location.coords[0]
@@ -2519,7 +2606,7 @@ class Gerber (Geometry):
         #
         # self.do_flashes()
         #
-        # self.solid_geometry = cascaded_union(self.buffered_paths +
+        # self.solid_geometry = unary_union(self.buffered_paths +
         #                                      [poly['polygon'] for poly in self.regions] +
         #                                      self.flash_geometry)
 
@@ -3207,23 +3294,51 @@ class CNCjob(Geometry):
 
         ## Flatten the geometry
         # Only linear elements (no polygons) remain.
+        # Shapely 2: flatten() expands Multi* via to_geometry_list.
         flat_geometry = geometry.flatten(pathonly=True)
         log.debug("%d paths" % len(flat_geometry))
 
         ## Index first and last points in paths
-        # What points to index.
+        # What points to index. Only single-part linear geometries have .coords.
         def get_pts(o):
-            return [o.coords[0], o.coords[-1]]
+            if getattr(o, "geom_type", None) in ("LineString", "LinearRing"):
+                coords = list(o.coords)
+                if not coords:
+                    return []
+                return [coords[0], coords[-1]]
+            if getattr(o, "geom_type", None) == "Point":
+                return [o.coords[0]]
+            # Safety: explode any remaining multi-part geometry.
+            pts = []
+            for part in to_geometry_list(o):
+                if getattr(part, "geom_type", None) in ("LineString", "LinearRing"):
+                    c = list(part.coords)
+                    if c:
+                        pts.extend([c[0], c[-1]])
+                elif getattr(part, "geom_type", None) == "Point":
+                    pts.append(part.coords[0])
+            return pts
 
         # Create the indexed storage.
         storage = FlatCAMRTreeStorage()
         storage.get_points = get_pts
 
-        # Store the geometry
+        # Store the geometry (only insert single-part paths).
         log.debug("Indexing geometry before generating G-Code...")
         for shape in flat_geometry:
-            if shape is not None:  # TODO: This shouldn't have happened.
-                storage.insert(shape)
+            if shape is None or getattr(shape, "is_empty", False):
+                continue
+            # Defend against any multi-part that slipped through flatten.
+            for part in to_geometry_list(shape):
+                if getattr(part, "geom_type", None) in (
+                    "LineString", "LinearRing", "Point"
+                ):
+                    storage.insert(part)
+                else:
+                    log.warning(
+                        "Skipping non-path geometry in G-code index: %s"
+                        % getattr(part, "geom_type", type(part))
+                    )
 
         if tooldia is not None:
             self.tooldia = tooldia
@@ -3262,20 +3377,23 @@ class CNCjob(Geometry):
                 # If last point in geometry is the nearest
                 # but prefer the first one if last point == first point
                 # then reverse coordinates.
+                # Shapely 2: LineString.coords is immutable — rebuild geometry.
                 if pt != geo.coords[0] and pt == geo.coords[-1]:
-                    geo.coords = list(geo.coords)[::-1]
+                    geo = LineString(list(geo.coords)[::-1])
+
+                geo_type = getattr(geo, "geom_type", None)
 
                 #---------- Single depth/pass --------
                 if not multidepth:
                     # G-code
                     # Note: self.linear2gcode() and self.point2gcode() will
                     # lower and raise the tool every time.
-                    if type(geo) == LineString or type(geo) == LinearRing:
+                    if geo_type in ("LineString", "LinearRing"):
                         self.gcode += self.linear2gcode(geo, tolerance=tolerance)
-                    elif type(geo) == Point:
+                    elif geo_type == "Point":
                         self.gcode += self.point2gcode(geo)
                     else:
-                        log.warning("G-code generation not implemented for %s" % (str(type(geo))))
+                        log.warning("G-code generation not implemented for %s" % geo_type)
 
                 #--------- Multi-pass ---------
                 else:
@@ -3284,48 +3402,69 @@ class CNCjob(Geometry):
                     else:
                         z_cut = Decimal(self.z_cut).quantize(Decimal('0.000000001'))
 
+                    # depth/pass is a positive step size (UI: "Depth of each pass (positive)").
+                    # Cut Z is negative into the material. Use absolute step so a negative
+                    # entry does not invert the loop (and hang).
                     if depthpercut is None:
-                        depthpercut = z_cut
-                    elif not isinstance(depthpercut, Decimal):
-                        depthpercut = Decimal(depthpercut).quantize(Decimal('0.000000001'))
+                        depthpercut = abs(z_cut) if z_cut != 0 else Decimal("0.001")
+                    else:
+                        if not isinstance(depthpercut, Decimal):
+                            depthpercut = Decimal(depthpercut).quantize(Decimal('0.000000001'))
+                        depthpercut = abs(depthpercut)
+                        if depthpercut == 0:
+                            depthpercut = abs(z_cut) if z_cut != 0 else Decimal("0.001")
 
-                    depth = 0
+                    depth = Decimal(0)
                     reverse = False
-                    while depth > z_cut:
-
-                        # Increase depth. Limit to z_cut.
-                        depth -= depthpercut
-                        if depth < z_cut:
-                            depth = z_cut
-
-                        # Cut at specific depth and do not lift the tool.
-                        # Note: linear2gcode() will use G00 to move to the
-                        # first point in the path, but it should be already
-                        # at the first point if the tool is down (in the material).
-                        # So, an extra G00 should show up but is inconsequential.
-                        if type(geo) == LineString or type(geo) == LinearRing:
-                            self.gcode += self.linear2gcode(geo, tolerance=tolerance,
-                                                            zcut=depth,
-                                                            up=False)
-
-                        # Ignore multi-pass for points.
-                        elif type(geo) == Point:
+                    # Guard against infinite loops if z_cut is not below 0.
+                    if z_cut >= 0:
+                        log.warning(
+                            "Multi-depth expects Cut Z < 0 (into material); got %s. "
+                            "Doing a single pass at that Z." % z_cut
+                        )
+                        if geo_type in ("LineString", "LinearRing"):
+                            self.gcode += self.linear2gcode(geo, tolerance=tolerance)
+                        elif geo_type == "Point":
                             self.gcode += self.point2gcode(geo)
-                            break  # Ignoring ...
+                    else:
+                        while depth > z_cut:
 
-                        else:
-                            log.warning("G-code generation not implemented for %s" % (str(type(geo))))
+                            # Increase depth (more negative). Limit to z_cut.
+                            depth -= depthpercut
+                            if depth < z_cut:
+                                depth = z_cut
 
-                        # Reverse coordinates if not a loop so we can continue
-                        # cutting without returning to the beginning.
-                        if type(geo) == LineString:
-                            geo.coords = list(geo.coords)[::-1]
-                            reverse = True
+                            # Cut at specific depth and do not lift the tool.
+                            # Note: linear2gcode() will use G00 to move to the
+                            # first point in the path, but it should be already
+                            # at the first point if the tool is down (in the material).
+                            # So, an extra G00 should show up but is inconsequential.
+                            if geo_type in ("LineString", "LinearRing"):
+                                self.gcode += self.linear2gcode(geo, tolerance=tolerance,
+                                                                zcut=float(depth),
+                                                                up=False)
+
+                            # Ignore multi-pass for points.
+                            elif geo_type == "Point":
+                                self.gcode += self.point2gcode(geo)
+                                break  # Ignoring ...
+
+                            else:
+                                log.warning(
+                                    "G-code generation not implemented for %s" % geo_type
+                                )
+                                break
+
+                            # Reverse coordinates if not a loop so we can continue
+                            # cutting without returning to the beginning.
+                            # Shapely 2: rebuild LineString (coords are immutable).
+                            if geo_type == "LineString":
+                                geo = LineString(list(geo.coords)[::-1])
+                                reverse = True
 
                     # If geometry is reversed, revert.
-                    if reverse:
-                        if type(geo) == LineString:
-                            geo.coords = list(geo.coords)[::-1]
+                    if reverse and getattr(geo, "geom_type", None) == "LineString":
+                        geo = LineString(list(geo.coords)[::-1])
 
                     # Lift the tool
                     self.gcode += "G00 Z%.4f\n" % self.z_move
@@ -3336,7 +3475,10 @@ class CNCjob(Geometry):
                 #rti.delete(hits[0], geo.coords[0])
                 #rti.delete(hits[0], geo.coords[-1])
 
-                current_pt = geo.coords[-1]
+                if getattr(geo, "geom_type", None) == "Point":
+                    current_pt = geo.coords[0]
+                else:
+                    current_pt = list(geo.coords)[-1]
 
                 # Next
                 pt, geo = storage.nearest(current_pt)
@@ -3538,7 +3680,7 @@ class CNCjob(Geometry):
         
     def create_geometry(self):
         # TODO: This takes forever. Too much data?
-        self.solid_geometry = cascaded_union([geo['geom'] for geo in self.gcode_parsed])
+        self.solid_geometry = unary_union([geo['geom'] for geo in self.gcode_parsed])
 
     def linear2gcode(self, linear, tolerance=0, down=True, up=True,
                      zcut=None, ztravel=None, downrate=None,
@@ -3751,13 +3893,13 @@ class CNCjob(Geometry):
             if g['kind'][0] == 'T': travels.append(g)
 
         # Used to determine the overall board size
-        self.solid_geometry = cascaded_union([geo['geom'] for geo in self.gcode_parsed])
+        self.solid_geometry = unary_union([geo['geom'] for geo in self.gcode_parsed])
 
         # Convert the cuts and travels into single geometry objects we can render as svg xml
         if travels:
-            travelsgeom = cascaded_union([geo['geom'] for geo in travels])
+            travelsgeom = unary_union([geo['geom'] for geo in travels])
         if cuts:
-            cutsgeom = cascaded_union([geo['geom'] for geo in cuts])
+            cutsgeom = unary_union([geo['geom'] for geo in cuts])
 
         # Render the SVG Xml
         # The scale factor affects the size of the lines, and the stroke color adds different formatting for each set
@@ -3940,13 +4082,8 @@ def dict2obj(d):
 
 
 def plotg(geo, solid_poly=False, color="black"):
-    try:
-        _ = iter(geo)
-    except:
-        geo = [geo]
-
-    for g in geo:
-        if type(g) == Polygon:
+    for g in to_geometry_list(geo):
+        if g.geom_type == "Polygon":
             if solid_poly:
                 patch = PolygonPatch(g,
                                      facecolor="#BBF268",
@@ -3961,24 +4098,19 @@ def plotg(geo, solid_poly=False, color="black"):
                 for ints in g.interiors:
                     x, y = ints.coords.xy
                     plot(x, y, color=color)
-                continue
+            continue
 
-        if type(g) == LineString or type(g) == LinearRing:
+        if g.geom_type in ("LineString", "LinearRing"):
             x, y = g.coords.xy
             plot(x, y, color=color)
             continue
 
-        if type(g) == Point:
+        if g.geom_type == "Point":
             x, y = g.coords.xy
             plot(x, y, 'o')
             continue
 
-        try:
-            _ = iter(g)
-            plotg(g, color=color)
-        except:
-            log.error("Cannot plot: " + str(type(g)))
-            continue
+        log.error("Cannot plot: " + str(type(g)))
 
 
 def parse_gerber_number(strnumber, frac_digits):
@@ -4200,11 +4332,8 @@ def parse_gerber_number(strnumber, frac_digits):
 
 
 def autolist(obj):
-    try:
-        _ = iter(obj)
-        return obj
-    except TypeError:
-        return [obj]
+    """Return a flat list of single-part geometries (Shapely 2 compatible)."""
+    return to_geometry_list(obj)
 
 
 def three_point_circle(p1, p2, p3):

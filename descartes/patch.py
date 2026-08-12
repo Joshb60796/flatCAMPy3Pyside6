@@ -28,6 +28,14 @@ class Polygon(object):
         return value
 
 
+def _ring_coords(ob):
+    """Return coordinate array for a ring (Shapely LinearRing or sequence)."""
+    coords = getattr(ob, "coords", None)
+    if coords is not None:
+        return asarray(coords)
+    return asarray(ob)
+
+
 def PolygonPath(polygon):
     """Constructs a compound matplotlib path from a Shapely or GeoJSON-like
     geometric object"""
@@ -41,10 +49,10 @@ def PolygonPath(polygon):
         vals[0] = Path.MOVETO
         return vals
     vertices = concatenate(
-                    [asarray(this.exterior)] 
-                    + [asarray(r) for r in this.interiors])
+                    [_ring_coords(this.exterior)]
+                    + [_ring_coords(r) for r in this.interiors])
     codes = concatenate(
-                [coding(this.exterior)] 
+                [coding(this.exterior)]
                 + [coding(r) for r in this.interiors])
     return Path(vertices, codes)
 
