@@ -319,6 +319,11 @@ class FlatCAMObj(QtCore.QObject):
         return
 
 
+# Isolation / geometry toolpaths. Must contrast with F.Cu red, B.Cu blue,
+# Edge.Cuts gold, drill red, and the pale generic-Gerber fill.
+GEOMETRY_PLOT_COLOR = "#1F9D55"
+
+
 def gerber_default_plot_colors(name):
     """
     Pick default plot colors from a Gerber object/file name.
@@ -1808,13 +1813,13 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
         for part in to_geometry_list(element):
             if part.geom_type == "Polygon":
                 x, y = part.exterior.coords.xy
-                self.axes.plot(x, y, 'r-')
+                self.axes.plot(x, y, '-', color=GEOMETRY_PLOT_COLOR)
                 for ints in part.interiors:
                     x, y = ints.coords.xy
-                    self.axes.plot(x, y, 'r-')
+                    self.axes.plot(x, y, '-', color=GEOMETRY_PLOT_COLOR)
             elif part.geom_type in ("LineString", "LinearRing"):
                 x, y = part.coords.xy
-                self.axes.plot(x, y, 'r-')
+                self.axes.plot(x, y, '-', color=GEOMETRY_PLOT_COLOR)
             else:
                 FlatCAMApp.App.log.warning("Did not plot:" + str(type(part)))
 
