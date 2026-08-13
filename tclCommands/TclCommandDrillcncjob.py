@@ -22,6 +22,7 @@ class TclCommandDrillcncjob(TclCommandSignaled):
         ('feedrate', float),
         ('spindlespeed', int),
         ('toolchange', bool),
+        ('toolchangez', float),
         ('outname', str)
     ])
 
@@ -39,6 +40,7 @@ class TclCommandDrillcncjob(TclCommandSignaled):
             ('feedrate', 'Drilling feed rate.'),
             ('spindlespeed', 'Speed of the spindle in rpm (example: 4000).'),
             ('toolchange', 'Enable tool changes (example: True).'),
+            ('toolchangez', 'Z height for tool change; must be >= travelz.'),
             ('outname', 'Name of the resulting Geometry object.')
         ]),
         'examples': []
@@ -74,10 +76,11 @@ class TclCommandDrillcncjob(TclCommandSignaled):
             job_obj.spindlespeed = args["spindlespeed"] if "spindlespeed" in args else None
 
             toolchange = True if "toolchange" in args and args["toolchange"] == 1 else False
+            toolchangez = args["toolchangez"] if "toolchangez" in args else None
 
             tools = args["tools"] if "tools" in args else 'all'
 
-            job_obj.generate_from_excellon_by_tool(obj, tools, toolchange)
+            job_obj.generate_from_excellon_by_tool(obj, tools, toolchange, toolchangez)
             job_obj.gcode_parse()
             job_obj.create_geometry()
 

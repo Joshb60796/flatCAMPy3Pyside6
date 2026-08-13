@@ -68,7 +68,7 @@ class TclCommandExportGcode(TclCommandSignaled):
         if obj is None:
             self.raise_tcl_error("Object not found: %s" % name)
 
-        if not isinstance(obj, CNCjob):
+        if not isinstance(obj, FlatCAMCNCjob):
             self.raise_tcl_error('Expected CNCjob, got %s %s.' % (name, type(obj)))
 
         if self.app.collection.has_promises():

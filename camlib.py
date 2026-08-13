@@ -50,6 +50,19 @@ from svg.path import Path, Line, Arc, CubicBezier, QuadraticBezier, parse_path
 
 from svgparse import *
 
+from gcode_safety import (
+    GCodeSafetyError,
+    parse_gcode_words,
+    validate_cnc_parameters,
+    assert_safe_gcode,
+    insert_dwell_after_spindle,
+    rewrite_gcode_xy,
+    scale_gcode_z_and_f,
+    replace_unit_codes,
+    split_standard_footer,
+    compose_export_text,
+)
+
 import logging
 
 log = logging.getLogger('base2')
@@ -3155,15 +3168,96 @@ class CNCjob(Geometry):
         factor = Geometry.convert_units(self, units)
         log.debug("CNCjob.convert_units()")
 
+        if factor == 1:
+            return factor
+
         self.z_cut *= factor
         self.z_move *= factor
         self.feedrate *= factor
         self.tooldia *= factor
 
+        if self.gcode:
+            self.gcode = scale_gcode_z_and_f(
+                self.gcode, factor, z_floor=float(self.z_cut)
+            )
+            self.gcode = replace_unit_codes(self.gcode, self.units)
+
         return factor
 
+    def _validate_job_params(self, toolchangez=None):
+        validate_cnc_parameters(
+            self.z_cut,
+            self.z_move,
+            self.feedrate,
+            toolchangez=toolchangez,
+            spindlespeed=self.spindlespeed,
+            units=self.units,
+        )
+
+    def _gcode_header(self):
+        gcode = self.unitcode[self.units.upper()] + "\n"
+        gcode += self.absolutecode + "\n"
+        gcode += self.feedminutecode + "\n"
+        gcode += "F%.2f\n" % self.feedrate
+        gcode += "G00 Z%.4f\n" % self.z_move
+        if self.spindlespeed is not None:
+            gcode += "M03 S%d\n" % int(self.spindlespeed)
+        else:
+            gcode += "M03\n"
+        return gcode
+
+    def _gcode_footer(self):
+        t = "G00 " + CNCjob.defaults["coordinate_format"] + "\n"
+        return ("G00 Z%.4f\n" % self.z_move) + (t % (0, 0)) + "M05\n"
+
+    def _map_parsed(self, transform):
+        if not self.gcode_parsed:
+            return
+        for g in self.gcode_parsed:
+            g["geom"] = transform(g["geom"])
+        self.create_geometry()
+
+    def compose_gcode(self, preamble="", postamble="", dwell=False, dwelltime=1):
+        return compose_export_text(
+            self.gcode or "",
+            preamble=preamble,
+            postamble=postamble,
+            z_move=self.z_move,
+            dwell=dwell,
+            dwelltime=dwelltime,
+            units=self.units,
+        )
+
+    def get_gcode(self, preamble="", postamble="", dwell=False, dwelltime=1):
+        text = self.compose_gcode(
+            preamble, postamble, dwell=dwell, dwelltime=dwelltime
+        )
+        if str(text).strip():
+            assert_safe_gcode(text, self.z_cut, self.z_move)
+        return text
+
+    def export_gcode(self, filename, preamble="", postamble="",
+                     dwell=False, dwelltime=1):
+        text = self.compose_gcode(
+            preamble, postamble, dwell=dwell, dwelltime=dwelltime
+        )
+        assert_safe_gcode(text, self.z_cut, self.z_move)
+        with open(filename, "w") as f:
+            f.write(text)
+        return text
+
+    def dwell_generator(self, lines, dwelltime=None):
+        if dwelltime is None:
+            dwelltime = 1
+        if isinstance(lines, str):
+            text = lines
+        else:
+            text = "".join(lines)
+        for line in StringIO(insert_dwell_after_spindle(text, dwelltime)):
+            yield line
+
     def generate_from_excellon_by_tool(self, exobj, tools="all",
-                                       toolchange=False, toolchangez=0.1):
+                                       toolchange=False, toolchangez=None):
         """
         Creates gcode for this object from an Excellon object
         for the specified tools.
@@ -3182,10 +3276,11 @@ class CNCjob(Geometry):
 
         log.debug("Creating CNC Job from Excellon...")
 
-        # Tools
+        if toolchangez is None:
+            toolchangez = self.z_move
+        self._validate_job_params(toolchangez=toolchangez if toolchange else None)
 
         # Sort tools by diameter. items() -> [('name', diameter), ...]
-        #sorted_tools = sorted(list(exobj.tools.items()), key=lambda tl: tl[1])
         sort = []
         for k, v in exobj.tools.items():
             sort.append((k, v.get('C')))
@@ -3195,11 +3290,9 @@ class CNCjob(Geometry):
             tools = [i[0] for i in sorted_tools]   # List if ordered tool names.
             log.debug("Tools 'all' and sorted are: %s" % str(tools))
         else:
-            selected_tools = [x.strip() for x in tools.split(",")]
-            selected_tools = [tl for tl in selected_tools if tl in selected_tools]
-
-            # Create a sorted list of selected tools from the sorted_tools list
-            tools = [i for i, j in sorted_tools for k in selected_tools if i == k]
+            selected_tools = [x.strip() for x in str(tools).split(",") if x.strip()]
+            # Keep the diameter-sorted order of the selection.
+            tools = [i for i, j in sorted_tools if i in selected_tools]
             log.debug("Tools selected and sorted are: %s" % str(tools))
 
         # Points (Group by tool)
@@ -3211,58 +3304,39 @@ class CNCjob(Geometry):
                 except KeyError:
                     points[drill['tool']] = [drill['point']]
 
-        # log.debug("Found %d drills." % len(points))
-        self.gcode = []
-
-        # Basic G-Code macros
         t = "G00 " + CNCjob.defaults["coordinate_format"] + "\n"
         down = "G01 Z%.4f\n" % self.z_cut
         up = "G00 Z%.4f\n" % self.z_move
         up_to_zero = "G01 Z0\n"
 
-        # Initialization
-        gcode = self.unitcode[self.units.upper()] + "\n"
-        gcode += self.absolutecode + "\n"
-        gcode += self.feedminutecode + "\n"
-        gcode += "F%.2f\n" % self.feedrate
-        gcode += "G00 Z%.4f\n" % self.z_move  # Move to travel height
-
-        if self.spindlespeed is not None:
-            # Spindle start with configured speed
-            gcode += "M03 S%d\n" % int(self.spindlespeed)
-        else:
-            gcode += "M03\n"  # Spindle start
-
-        # gcode += self.pausecode + "\n"
+        gcode = self._gcode_header()
 
         for tool in tools:
+            if tool not in points:
+                continue
+            if toolchange:
+                gcode += "G00 Z%.4f\n" % toolchangez
+                gcode += "T%d\n" % int(tool)
+                gcode += "M5\n"
+                gcode += "M6\n"
+                gcode += "(MSG, Change to tool dia=%.4f)\n" % exobj.tools[tool]["C"]
+                gcode += "M0\n"
+                if self.spindlespeed is not None:
+                    gcode += "M03 S%d\n" % int(self.spindlespeed)
+                else:
+                    gcode += "M03\n"
+                # Never travel at tool-change height if that is above
+                # travel Z — drop back to travel before the first XY.
+                gcode += "G00 Z%.4f\n" % self.z_move
 
-            # Only if tool has points.
-            if tool in points:
-                # Tool change sequence (optional)
-                if toolchange:
-                    gcode += "G00 Z%.4f\n" % toolchangez
-                    gcode += "T%d\n" % int(tool)  # Indicate tool slot (for automatic tool changer)
-                    gcode += "M5\n"  # Spindle Stop
-                    gcode += "M6\n"  # Tool change
-                    gcode += "(MSG, Change to tool dia=%.4f)\n" % exobj.tools[tool]["C"]
-                    gcode += "M0\n"  # Temporary machine stop
-                    if self.spindlespeed is not None:
-                        # Spindle start with configured speed
-                        gcode += "M03 S%d\n" % int(self.spindlespeed)
-                    else:
-                        gcode += "M03\n"  # Spindle start
+            for point in points[tool]:
+                x, y = point.coords.xy
+                gcode += t % (x[0], y[0])
+                gcode += down + up_to_zero + up
 
-                # Drillling!
-                for point in points[tool]:
-                    x, y = point.coords.xy
-                    gcode += t % (x[0], y[0])
-                    gcode += down + up_to_zero + up
-
-        gcode += t % (0, 0)
-        gcode += "M05\n"  # Spindle stop
-
+        gcode += self._gcode_footer()
         self.gcode = gcode
+        assert_safe_gcode(self.gcode, self.z_cut, self.z_move)
 
     def generate_from_geometry_2(self,
                                  geometry,
@@ -3290,6 +3364,7 @@ class CNCjob(Geometry):
         assert isinstance(geometry, Geometry), \
             "Expected a Geometry, got %s" % type(geometry)
 
+        self._validate_job_params()
         log.debug("generate_from_geometry_2()")
 
         ## Flatten the geometry
@@ -3343,29 +3418,18 @@ class CNCjob(Geometry):
         if tooldia is not None:
             self.tooldia = tooldia
 
-        # self.input_geometry_bounds = geometry.bounds()
-
-        if not append:
-            self.gcode = ""
-
-        # Initial G-Code
-        self.gcode = self.unitcode[self.units.upper()] + "\n"
-        self.gcode += self.absolutecode + "\n"
-        self.gcode += self.feedminutecode + "\n"
-        self.gcode += "F%.2f\n" % self.feedrate
-        self.gcode += "G00 Z%.4f\n" % self.z_move  # Move (up) to travel height
-        if self.spindlespeed is not None:
-            self.gcode += "M03 S%d\n" % int(self.spindlespeed)  # Spindle start with configured speed
+        if append and isinstance(self.gcode, str) and self.gcode.strip():
+            existing, _footer = split_standard_footer(self.gcode)
+            self.gcode = existing
         else:
-            self.gcode += "M03\n"  # Spindle start
-        #self.gcode += self.pausecode + "\n"
+            self.gcode = self._gcode_header()
 
         ## Iterate over geometry paths getting the nearest each time.
         log.debug("Starting G-Code...")
         path_count = 0
         current_pt = (0, 0)
-        pt, geo = storage.nearest(current_pt)
         try:
+            pt, geo = storage.nearest(current_pt)
             while True:
                 path_count += 1
                 #print "Current: ", "(%.3f, %.3f)" % current_pt
@@ -3416,6 +3480,13 @@ class CNCjob(Geometry):
 
                     depth = Decimal(0)
                     reverse = False
+                    # Simplify once. Re-simplifying a reversed path can move
+                    # the start point, and a G00 to that new start while the
+                    # tool is down would rapid through the material.
+                    if tolerance and geo_type in ("LineString", "LinearRing"):
+                        geo = geo.simplify(tolerance)
+                        geo_type = getattr(geo, "geom_type", geo_type)
+                    pass_tol = 0
                     # Guard against infinite loops if z_cut is not below 0.
                     if z_cut >= 0:
                         log.warning(
@@ -3423,10 +3494,11 @@ class CNCjob(Geometry):
                             "Doing a single pass at that Z." % z_cut
                         )
                         if geo_type in ("LineString", "LinearRing"):
-                            self.gcode += self.linear2gcode(geo, tolerance=tolerance)
+                            self.gcode += self.linear2gcode(geo, tolerance=pass_tol)
                         elif geo_type == "Point":
                             self.gcode += self.point2gcode(geo)
                     else:
+                        first_pass = True
                         while depth > z_cut:
 
                             # Increase depth (more negative). Limit to z_cut.
@@ -3434,15 +3506,14 @@ class CNCjob(Geometry):
                             if depth < z_cut:
                                 depth = z_cut
 
-                            # Cut at specific depth and do not lift the tool.
-                            # Note: linear2gcode() will use G00 to move to the
-                            # first point in the path, but it should be already
-                            # at the first point if the tool is down (in the material).
-                            # So, an extra G00 should show up but is inconsequential.
                             if geo_type in ("LineString", "LinearRing"):
-                                self.gcode += self.linear2gcode(geo, tolerance=tolerance,
-                                                                zcut=float(depth),
-                                                                up=False)
+                                self.gcode += self.linear2gcode(
+                                    geo,
+                                    tolerance=pass_tol,
+                                    zcut=float(depth),
+                                    up=False,
+                                    cont=not first_pass,
+                                )
 
                             # Ignore multi-pass for points.
                             elif geo_type == "Point":
@@ -3455,6 +3526,7 @@ class CNCjob(Geometry):
                                 )
                                 break
 
+                            first_pass = False
                             # Reverse coordinates if not a loop so we can continue
                             # cutting without returning to the beginning.
                             # Shapely 2: rebuild LineString (coords are immutable).
@@ -3488,10 +3560,8 @@ class CNCjob(Geometry):
 
         log.debug("%s paths traced." % path_count)
 
-        # Finish
-        self.gcode += "G00 Z%.4f\n" % self.z_move  # Stop cutting
-        self.gcode += "G00 X0Y0\n"
-        self.gcode += "M05\n"  # Spindle stop
+        self.gcode += self._gcode_footer()
+        assert_safe_gcode(self.gcode, self.z_cut, self.z_move)
 
     @staticmethod
     def codes_split(gline):
@@ -3502,16 +3572,7 @@ class CNCjob(Geometry):
         :param gline: G-Code line string
         :return: Dictionary with parsed line.
         """
-
-        command = {}
-
-        match = re.search(r'^\s*([A-Z])\s*([\+\-\.\d\s]+)', gline)
-        while match:
-            command[match.group(1)] = float(match.group(2).replace(" ", ""))
-            gline = gline[match.end():]
-            match = re.search(r'^\s*([A-Z])\s*([\+\-\.\d\s]+)', gline)
-
-        return command
+        return parse_gcode_words(gline)
 
     def gcode_parse(self):
         """
@@ -3581,9 +3642,11 @@ class CNCjob(Geometry):
                     path.append((x, y))
 
                 if current['G'] in [2, 3]:  # arc
-                    center = [gobj['I'] + current['X'], gobj['J'] + current['Y']]
-                    radius = sqrt(gobj['I']**2 + gobj['J']**2)
-                    start = arctan2(-gobj['J'], -gobj['I'])
+                    i = gobj.get('I', 0.0)
+                    j = gobj.get('J', 0.0)
+                    center = [i + current['X'], j + current['Y']]
+                    radius = sqrt(i**2 + j**2)
+                    start = arctan2(-j, -i)
                     stop = arctan2(-center[1] + y, -center[0] + x)
                     path += arc(center, radius, start, stop,
                                 arcdir[current['G']],
@@ -3717,18 +3780,22 @@ class CNCjob(Geometry):
         else:
             target_linear = linear
 
+        if target_linear is None or getattr(target_linear, "is_empty", False):
+            return ""
+        path = list(target_linear.coords)
+        if not path:
+            return ""
+
         gcode = ""
 
-        path = list(target_linear.coords)
-
-        # Move fast to 1st point
+        # Move fast to 1st point (only while the tool is up).
         if not cont:
             gcode += t % (0, path[0][0], path[0][1])  # Move to first point
 
         # Move down to cutting depth
         if down:
-            # Different feedrate for vertical cut?
-            if self.zdownrate is not None:
+            # Honour an explicit downrate even if the job has no default.
+            if downrate is not None:
                 gcode += "F%.2f\n" % downrate
                 gcode += "G01 Z%.4f\n" % zcut       # Start cutting
                 gcode += "F%.2f\n" % feedrate       # Restore feedrate
@@ -3736,7 +3803,11 @@ class CNCjob(Geometry):
                 gcode += "G01 Z%.4f\n" % zcut       # Start cutting
 
         # Cutting...
-        for pt in path[1:]:
+        # On a continuation pass the tool is already down: feed to the
+        # first vertex (zero-length if we are already there; a cut, not
+        # a rapid, if simplification drifted the start point).
+        start_at = 0 if cont else 1
+        for pt in path[start_at:]:
             gcode += t % (1, pt[0], pt[1])    # Linear motion to point
 
         # Up to travelling height.
@@ -3746,10 +3817,13 @@ class CNCjob(Geometry):
         return gcode
 
     def point2gcode(self, point):
-        gcode = ""
-        #t = "G0%d X%.4fY%.4f\n"
-        t = "G0%d " + CNCjob.defaults["coordinate_format"] + "\n"
+        if point is None or getattr(point, "is_empty", False):
+            return ""
         path = list(point.coords)
+        if not path:
+            return ""
+        gcode = ""
+        t = "G0%d " + CNCjob.defaults["coordinate_format"] + "\n"
         gcode += t % (0, path[0][0], path[0][1])  # Move to first point
 
         if self.zdownrate is not None:
@@ -3774,10 +3848,13 @@ class CNCjob(Geometry):
         :rtype: None
         """
 
-        for g in self.gcode_parsed:
-            g['geom'] = affinity.scale(g['geom'], factor, factor, origin=(0, 0))
-
-        self.create_geometry()
+        self._map_parsed(
+            lambda g: affinity.scale(g, factor, factor, origin=(0, 0))
+        )
+        if self.gcode:
+            self.gcode = rewrite_gcode_xy(
+                self.gcode, lambda x, y: (x * factor, y * factor)
+            )
 
     def offset(self, vect):
         """
@@ -3790,10 +3867,11 @@ class CNCjob(Geometry):
         """
         dx, dy = vect
 
-        for g in self.gcode_parsed:
-            g['geom'] = affinity.translate(g['geom'], xoff=dx, yoff=dy)
-
-        self.create_geometry()
+        self._map_parsed(lambda g: affinity.translate(g, xoff=dx, yoff=dy))
+        if self.gcode:
+            self.gcode = rewrite_gcode_xy(
+                self.gcode, lambda x, y: (x + dx, y + dy)
+            )
 
     def skew(self, angle_x=None, angle_y=None, point=None):
         """
@@ -3815,16 +3893,15 @@ class CNCjob(Geometry):
             angle_y = 0.0
         if angle_x is None:
             angle_x = 0.0
-        if point == None:
-            for g in self.gcode_parsed:
-                g['geom'] = affinity.skew(g['geom'], angle_x, angle_y,
-                                          origin=(0, 0))
-        else:
-            for g in self.gcode_parsed:
-                g['geom'] = affinity.skew(g['geom'], angle_x, angle_y,
-                                          origin=point)
-
-        self.create_geometry()
+        origin = (0, 0) if point is None else point
+        self._map_parsed(
+            lambda g: affinity.skew(g, angle_x, angle_y, origin=origin)
+        )
+        if self.gcode:
+            def _fn(x, y):
+                p = affinity.skew(Point(x, y), angle_x, angle_y, origin=origin)
+                return p.x, p.y
+            self.gcode = rewrite_gcode_xy(self.gcode, _fn)
 
     def rotate(self, angle, point=None):
         """
@@ -3833,15 +3910,13 @@ class CNCjob(Geometry):
         :param point:
         :return:
         """
-        if point is None:
-            for g in self.gcode_parsed:
-                g['geom'] = affinity.rotate(g['geom'], angle, origin='center')
-        else:
-            px, py = point
-            for g in self.gcode_parsed:
-                g['geom'] = affinity.rotate(g['geom'], angle, origin=(px, py))
-
-        self.create_geometry()
+        origin = (0, 0) if point is None else tuple(point)
+        self._map_parsed(lambda g: affinity.rotate(g, angle, origin=origin))
+        if self.gcode:
+            def _fn(x, y):
+                p = affinity.rotate(Point(x, y), angle, origin=origin)
+                return p.x, p.y
+            self.gcode = rewrite_gcode_xy(self.gcode, _fn)
 
     def mirror(self, axis, point=None):
         """
@@ -3852,15 +3927,18 @@ class CNCjob(Geometry):
         """
         if point is None:
             return
-        else:
-            px, py = point
+        px, py = point
 
         xscale, yscale = {"X": (1.0, -1.0), "Y": (-1.0, 1.0)}[axis]
 
-        for g in self.gcode_parsed:
-            g['geom'] = affinity.scale(g['geom'], xscale, yscale, origin=(px, py))
-
-        self.create_geometry()
+        self._map_parsed(
+            lambda g: affinity.scale(g, xscale, yscale, origin=(px, py))
+        )
+        if self.gcode:
+            def _fn(x, y):
+                p = affinity.scale(Point(x, y), xscale, yscale, origin=(px, py))
+                return p.x, p.y
+            self.gcode = rewrite_gcode_xy(self.gcode, _fn)
         return
 
     def export_svg(self, scale_factor=0.00):

@@ -158,6 +158,10 @@ class ExcellonFlowTestCase(unittest.TestCase):
 
         cncjob_obj.export_gcode(output_filename)
         self.assertTrue(os.path.isfile(output_filename))
+        from gcode_safety import assert_safe_gcode
+        with open(output_filename, "r", encoding="utf-8", errors="replace") as fh:
+            exported = fh.read()
+        assert_safe_gcode(exported, cncjob_obj.z_cut, cncjob_obj.z_move)
         os.remove(output_filename)
 
         print(names)

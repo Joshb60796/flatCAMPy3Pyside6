@@ -199,11 +199,13 @@ class KB2040ProjectTest(unittest.TestCase):
             size = os.path.getsize(out)
             self.assertGreater(size, 0, "Empty G-code file")
             with open(out, "r", encoding="utf-8", errors="replace") as f:
-                text = f.read(500)
+                text = f.read()
             self.assertTrue(
                 any(tok in text.upper() for tok in ("G0", "G00", "G1", "G01", "X", "Y")),
                 "G-code does not look like motion code: %r" % text[:200],
             )
+            from gcode_safety import assert_safe_gcode
+            assert_safe_gcode(text, cnc.z_cut, cnc.z_move)
         finally:
             if os.path.isfile(out):
                 os.remove(out)
@@ -246,6 +248,22 @@ class KB2040ProjectTest(unittest.TestCase):
                 self.assertTrue(geoms is not None or True)
             names = self._wait_names(2, timeout=60.0)
             self.assertGreaterEqual(len(names), 1)
+            cnc_name = "KB2040-PTH.drl_cnc"
+            if cnc_name in names:
+                cnc = self.fc.collection.get_by_name(cnc_name)
+                self.assertIsInstance(cnc, FlatCAMCNCjob)
+                with tempfile.NamedTemporaryFile(
+                    prefix="kb2040_pth_", suffix=".gcode", delete=False
+                ) as tmp:
+                    out = tmp.name
+                try:
+                    cnc.export_gcode(out)
+                    from gcode_safety import assert_safe_gcode
+                    with open(out, "r", encoding="utf-8", errors="replace") as f:
+                        assert_safe_gcode(f.read(), cnc.z_cut, cnc.z_move)
+                finally:
+                    if os.path.isfile(out):
+                        os.remove(out)
         else:
             exc.build_ui()
             pump(self.qapp, 0.2)

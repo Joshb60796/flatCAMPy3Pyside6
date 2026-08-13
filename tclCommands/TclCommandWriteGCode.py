@@ -78,10 +78,11 @@ class TclCommandWriteGCode(TclCommandSignaled):
 
         # self.log.debug("write_gcode(): No promises. Continuing for %s." % obj_name)
 
-        try:
-            obj = self.app.collection.get_by_name(str(obj_name))
-        except:
+        obj = self.app.collection.get_by_name(str(obj_name))
+        if obj is None:
             return "Could not retrieve object: %s" % obj_name
+        if not isinstance(obj, FlatCAMCNCjob):
+            return "Expected CNC Job, got %s %s." % (obj_name, type(obj))
 
         try:
             obj.export_gcode(str(filename), str(preamble), str(postamble))

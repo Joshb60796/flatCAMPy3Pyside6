@@ -1280,58 +1280,22 @@ class FlatCAMCNCjob(FlatCAMObj, CNCjob):
         """
         Inserts "G4 P..." instructions after spindle-start
         instructions (M03 or M04).
-
         """
-
-        log.debug("dwell_generator()...")
-
-        m3m4re = re.compile(r'^\s*[mM]0[34]')
-        g4re = re.compile(r'^\s*[gG]4\s+([\d\.\+\-e]+)')
-        bufline = None
-
-        for line in lines:
-            # If the buffer contains a G4, yield that.
-            # If current line is a G4, discard it.
-            if bufline is not None:
-                yield bufline
-                bufline = None
-
-                if not g4re.search(line):
-                    yield line
-
-                continue
-
-            # If start spindle, buffer a G4.
-            if m3m4re.search(line):
-                log.debug("Found M03/4")
-                bufline = "G4 P{}\n".format(self.options['dwelltime'])
-
-            yield line
-
-        # Flush any buffered dwell after the last line.
-        if bufline is not None:
-            yield bufline
-        # Python 3.7+: do not raise StopIteration inside generators.
+        return CNCjob.dwell_generator(
+            self, lines, self.options.get("dwelltime", 1)
+        )
 
     def export_gcode(self, filename, preamble='', postamble='', processor=''):
-
-        lines = StringIO(self.gcode)
-
-        ## Post processing
-        # Dwell?
-        if self.options['dwell']:
-            log.debug("Will add G04!")
-            lines = self.dwell_generator(lines)
-
-        ## Write
-        with open(filename, 'w') as f:
-            f.write(preamble + "\n")
-
-            for line in lines:
-
-                f.write(line)
-
-            f.write(postamble)
+        dwell = bool(self.options.get("dwell"))
+        dwelltime = self.options.get("dwelltime", 1)
+        CNCjob.export_gcode(
+            self,
+            filename,
+            preamble=preamble,
+            postamble=postamble,
+            dwell=dwell,
+            dwelltime=dwelltime,
+        )
 
         # Just for adding it to the recent files list.
         self.app.file_opened.emit("cncjob", filename)
@@ -1339,8 +1303,13 @@ class FlatCAMCNCjob(FlatCAMObj, CNCjob):
         self.app.inform.emit("Saved to: " + filename)
 
     def get_gcode(self, preamble='', postamble=''):
-        #we need this to beable get_gcode separatelly for shell command export_code
-        return preamble + '\n' + self.gcode + "\n" + postamble
+        # Shared with the Tcl export_gcode command; must apply the same
+        # dwell / preamble safety rules as writing a file.
+        dwell = bool(self.options.get("dwell"))
+        dwelltime = self.options.get("dwelltime", 1)
+        return CNCjob.get_gcode(
+            self, preamble, postamble, dwell=dwell, dwelltime=dwelltime
+        )
 
     def on_plot_cb_click(self, *args):
         if self.muted_ui:
