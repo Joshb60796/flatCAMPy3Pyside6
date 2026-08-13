@@ -13,10 +13,10 @@ import tempfile
 import time
 import unittest
 from io import StringIO
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from PySide6 import QtCore, QtWidgets
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -27,7 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from FlatCAMApp import App
 from FlatCAMObj import FlatCAMCNCjob, FlatCAMExcellon, FlatCAMGeometry, FlatCAMGerber
 from camlib import CNCjob
-from gcode_safety import GCodeSafetyError, assert_safe_gcode, parse_gcode_words
+from gcode_safety import GCodeSafetyError, assert_safe_gcode
 
 GERBER = os.path.join(ROOT, "tests", "gerber_files", "simple1.gbr").replace("\\", "/")
 EXCELLON = os.path.join(ROOT, "tests", "excellon_files", "case1.drl").replace("\\", "/")
