@@ -27,18 +27,22 @@ import ObjectCollection
 from FlatCAMObj import FlatCAMCNCjob, FlatCAMExcellon, FlatCAMGerber, FlatCAMGeometry, FlatCAMObj
 from PlotCanvas import PlotCanvas
 from FlatCAMGUI import FlatCAMGUI, GlobalOptionsUI, FlatCAMActivityView, FlatCAMInfoBar
-from FlatCAMCommon import LoudDict
+from FlatCAMCommon import LoudDict, park_scroll_widget
 from FlatCAMShell import FCShell
 from FlatCAMDraw import FlatCAMDraw
 from FlatCAMProcess import *
-from GUIElements import FCInputDialog
+from GUIElements import FCInputDialog, LengthEntry
 from ToolMeasurement import Measurement
 from ToolDblSided import DblSidedTool
 from ToolTransform import ToolTransform
+from ToolStock import ToolStock
+from stock import StockManager
 import tclCommands
 
 from camlib import *
 import flatcam_defaults
+import theme as fc_theme
+import units as fc_units
 
 
 def _qt_get_open_filename(caption, directory=''):
@@ -288,6 +292,11 @@ class App(QtCore.QObject):
             "geometry_selectmethod": self.defaults_form.geometry_group.selectmethod_combo,
             "geometry_pathconnect": self.defaults_form.geometry_group.pathconnect_cb,
             "geometry_paintcontour": self.defaults_form.geometry_group.contour_cb,
+            "geometry_multidepth": self.defaults_form.geometry_group.mpass_cb,
+            "geometry_depthperpass": self.defaults_form.geometry_group.maxdepth_entry,
+            "geometry_traceoffset": self.defaults_form.geometry_group.traceoffset_radio,
+            "excellon_multidepth": self.defaults_form.excellon_group.mpass_cb,
+            "excellon_depthperpass": self.defaults_form.excellon_group.maxdepth_entry,
             "cncjob_plot": self.defaults_form.cncjob_group.plot_cb,
             "cncjob_tooldia": self.defaults_form.cncjob_group.tooldia_entry,
             "cncjob_prepend": self.defaults_form.cncjob_group.prepend_text,
@@ -306,6 +315,10 @@ class App(QtCore.QObject):
         ### Load defaults from file ###
         if user_defaults:
             self.load_defaults()
+            flatcam_defaults.migrate_stock_defaults(self.defaults)
+            fc_units.migrate_storage_to_mm(
+                self.defaults, flatcam_defaults.DIMENSIONAL_OPTION_KEYS
+            )
 
         chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
         if self.defaults['serial'] == 0 or len(str(self.defaults['serial'])) < 10:
@@ -360,6 +373,11 @@ class App(QtCore.QObject):
             "geometry_paintoverlap": self.options_form.geometry_group.paintoverlap_entry,
             "geometry_paintmargin": self.options_form.geometry_group.paintmargin_entry,
             "geometry_selectmethod": self.options_form.geometry_group.selectmethod_combo,
+            "geometry_multidepth": self.options_form.geometry_group.mpass_cb,
+            "geometry_depthperpass": self.options_form.geometry_group.maxdepth_entry,
+            "geometry_traceoffset": self.options_form.geometry_group.traceoffset_radio,
+            "excellon_multidepth": self.options_form.excellon_group.mpass_cb,
+            "excellon_depthperpass": self.options_form.excellon_group.maxdepth_entry,
             "cncjob_plot": self.options_form.cncjob_group.plot_cb,
             "cncjob_tooldia": self.options_form.cncjob_group.tooldia_entry,
             "cncjob_prepend": self.options_form.cncjob_group.prepend_text,
@@ -368,13 +386,24 @@ class App(QtCore.QObject):
 
         self.options = LoudDict()
         self.options.set_change_callback(self.on_options_dict_change)
-        # Start from MM project CAM defaults, then overlay full app defaults.
+        # CAM numbers are millimetres. ``units`` is display/export only.
         self.options.update(flatcam_defaults.project_options_defaults("MM"))
-        self.options.update(self.defaults)  # Copy app defaults to project options
-        # Ensure project units stay MM after defaults merge (defaults also set MM).
-        self.options["units"] = "MM"
-        #self.options_write_form()
+        self.options.update(self.defaults)
+        fc_units.migrate_storage_to_mm(
+            self.options, flatcam_defaults.DIMENSIONAL_OPTION_KEYS
+        )
+        # Keep both option pages in a stack so switching the combo never
+        # reparents them through QScrollArea (that was shrinking the font).
+        self.options_stack = QtWidgets.QStackedWidget()
+        self.defaults_form.setParent(None)
+        self.options_form.setParent(None)
+        self.options_stack.addWidget(self.defaults_form)
+        self.options_stack.addWidget(self.options_form)
+        self.ui.options_scroll_area.setWidget(self.options_stack)
         self.on_options_combo_change(0)  # Will show the initial form
+        self.defaults_write_form()
+        self.options_write_form()
+        self.set_screen_units(self.options.get("units", "MM"))
 
         self.collection = ObjectCollection.ObjectCollection()
         self.ui.project_tab_layout.addWidget(self.collection.view)
@@ -427,6 +456,7 @@ class App(QtCore.QObject):
         self.ui.menufilesavedefaults.triggered.connect(self.on_file_savedefaults)
         self.ui.exit_action.triggered.connect(self.on_file_exit)
         self.ui.menueditnew.triggered.connect(lambda: self.new_object('geometry', 'New Geometry', lambda x, y: None))
+        self.ui.menueditnewexc.triggered.connect(self.on_new_excellon)
         self.ui.menueditedit.triggered.connect(self.edit_geometry)
         self.ui.menueditok.triggered.connect(self.editor2geometry)
         self.ui.menueditjoin.triggered.connect(self.on_edit_join)
@@ -440,6 +470,8 @@ class App(QtCore.QObject):
         self.ui.menuviewdisableall.triggered.connect(self.disable_plots)
         self.ui.menuviewdisableother.triggered.connect(lambda: self.disable_plots(except_current=True))
         self.ui.menuviewenable.triggered.connect(self.enable_all_plots)
+        self.ui.menuview_dark.triggered.connect(self.on_toggle_dark_mode)
+        self.ui.menuview_stock.triggered.connect(self.on_toggle_stock_visible)
         self.ui.menutoolshell.triggered.connect(self.on_toggle_shell)
         self.ui.menuhelp_about.triggered.connect(self.on_about)
         self.ui.menuhelp_home.triggered.connect(lambda: webbrowser.open(self.app_url))
@@ -455,6 +487,7 @@ class App(QtCore.QObject):
         self.ui.clear_plot_btn.triggered.connect(self.plotcanvas.clear)
         self.ui.replot_btn.triggered.connect(self.on_toolbar_replot)
         self.ui.newgeo_btn.triggered.connect(lambda: self.new_object('geometry', 'New Geometry', lambda x, y: None))
+        self.ui.newexc_btn.triggered.connect(self.on_new_excellon)
         self.ui.editgeo_btn.triggered.connect(self.edit_geometry)
         self.ui.updategeo_btn.triggered.connect(self.editor2geometry)
         self.ui.delete_btn.triggered.connect(self.on_delete)
@@ -487,6 +520,12 @@ class App(QtCore.QObject):
 
         self.transform_tool = ToolTransform(self)
         self.transform_tool.install(icon=QtGui.QIcon('share/transform.png'), pos=self.ui.menuedit)
+
+        self.stock = StockManager(self)
+        self.plotcanvas.on_cleared = self.stock.redraw
+        self.stock_tool = ToolStock(self)
+        self.stock_tool.install(icon=QtGui.QIcon('share/rectangle32.png'), separator=True)
+        self.ui.stock_btn.triggered.connect(self.stock_tool.run)
 
         self.draw = FlatCAMDraw(self, disabled=True)
 
@@ -521,6 +560,16 @@ class App(QtCore.QObject):
         else:
             self.ui.shell_dock.hide()
 
+        # Theme after the window, plot, and shell exist.
+        self.apply_theme(bool(self.defaults.get("gui_dark_mode", False)), replot=False)
+        self.ui.menuview_stock.blockSignals(True)
+        self.ui.menuview_stock.setChecked(bool(self.options.get("stock_visible", True)))
+        self.ui.menuview_stock.blockSignals(False)
+        try:
+            self.stock.redraw()
+        except Exception:
+            pass
+
         if self.cmd_line_shellfile:
             try:
                 with open(self.cmd_line_shellfile, "r") as myfile:
@@ -549,8 +598,13 @@ class App(QtCore.QObject):
             self.setup_shell()
 
     def defaults_read_form(self):
+        lu = dict(self.defaults.get("length_units") or {})
         for option in self.defaults_form_fields:
-            self.defaults[option] = self.defaults_form_fields[option].get_value()
+            field = self.defaults_form_fields[option]
+            self.defaults[option] = field.get_value()
+            if isinstance(field, LengthEntry):
+                lu[option] = field.display_units
+        self.defaults["length_units"] = lu
 
     def defaults_write_form(self):
         for option in self.defaults:
@@ -564,7 +618,10 @@ class App(QtCore.QObject):
 
     def defaults_write_form_field(self, field):
         try:
-            self.defaults_form_fields[field].set_value(self.defaults[field])
+            widget = self.defaults_form_fields[field]
+            if isinstance(widget, LengthEntry):
+                widget.display_units = fc_units.unit_for_option(self.defaults, field)
+            widget.set_value(self.defaults[field])
         except KeyError:
             #self.log.debug("defaults_write_form(): No field for: %s" % option)
             # TODO: Rethink this?
@@ -632,6 +689,65 @@ class App(QtCore.QObject):
         self.ui.updategeo_btn.setEnabled(False)
 
         geo.plot()
+
+    @property
+    def dark_mode(self):
+        return bool(self.defaults.get("gui_dark_mode", False))
+
+    def on_new_excellon(self):
+        def init(obj, app):
+            obj.tools = {}
+            obj.drills = []
+            obj.solid_geometry = []
+        self.new_object('excellon', 'New Excellon', init)
+
+    def on_toggle_dark_mode(self, checked=False):
+        enabled = bool(self.ui.menuview_dark.isChecked())
+        self.defaults["gui_dark_mode"] = enabled
+        self.apply_theme(enabled, replot=True)
+
+    def on_toggle_stock_visible(self, checked=False):
+        visible = bool(self.ui.menuview_stock.isChecked())
+        self.stock.set_visible(visible)
+        if getattr(self, "stock_tool", None) is not None:
+            self.stock_tool.show_cb.blockSignals(True)
+            self.stock_tool.show_cb.set_value(visible)
+            self.stock_tool.show_cb.blockSignals(False)
+            self.stock_tool.refresh_fit()
+        try:
+            self.on_zoom_fit(None)
+        except Exception:
+            pass
+
+    def apply_theme(self, dark=False, replot=True):
+        """Apply light/dark theme to Qt, plot, editor, and shell."""
+        dark = bool(dark)
+        self.defaults["gui_dark_mode"] = dark
+        self.ui.menuview_dark.blockSignals(True)
+        self.ui.menuview_dark.setChecked(dark)
+        self.ui.menuview_dark.blockSignals(False)
+
+        qapp = QtWidgets.QApplication.instance()
+        fc_theme.apply_qt_theme(qapp, dark=dark)
+        fc_theme.apply_plotcanvas_theme(self.plotcanvas, dark=dark)
+        fc_theme.apply_termwidget_theme(getattr(self, "shell", None), dark=dark)
+        try:
+            if getattr(self, "stock", None) is not None:
+                self.stock.redraw()
+        except Exception:
+            pass
+
+        if replot:
+            try:
+                self.on_toolbar_replot()
+            except Exception:
+                pass
+            try:
+                draw = getattr(self, "draw", None)
+                if draw is not None and draw.drawing_toolbar.isEnabled():
+                    draw.replot()
+            except Exception:
+                pass
 
     def get_last_folder(self):
         return self.defaults["last_folder"]
@@ -957,13 +1073,17 @@ class App(QtCore.QObject):
 
         App.log.debug("Calling object constructor...")
         obj = classdict[kind](name)
-        obj.units = self.options["units"]  # TODO: The constructor should look at defaults.
+        # Geometry is always millimetres. Display/export units are separate.
+        obj.units = "MM"
 
         # Set default options from self.options
         for option in self.options:
             if option.find(kind + "_") == 0:
                 oname = option[len(kind) + 1:]
                 obj.options[oname] = self.options[option]
+        obj.options["length_units"] = fc_units.copy_length_units_for_kind(
+            self.options, kind
+        )
 
         # make sure that the plot option of the new object is reflecting the current status and not the general option
         # solve issues with the modelview currently used (checkbox on the Project Tab)
@@ -979,11 +1099,20 @@ class App(QtCore.QObject):
         t2 = time.time()
         self.log.debug("%f seconds executing initialize()." % (t2 - t1))
 
-        # Check units and convert if necessary
-        # This condition CAN be true because initialize() can change obj.units
-        if self.options["units"].upper() != obj.units.upper():
-            self.inform.emit("Converting units to " + self.options["units"] + ".")
-            obj.convert_units(self.options["units"])
+        # File parsers may leave geometry in inches. Storage is always mm.
+        # Options are already mm except legacy projects deserialized in-place.
+        if str(getattr(obj, "units", "MM")).upper() != "MM":
+            factor = obj.convert_units("MM")
+            # CNC convert_units already scaled tooldia / Z / F / G-code.
+            # Scaling options again made plot diameter 25.4× too large.
+            if (
+                getattr(obj, "_loaded_from_project", False)
+                and factor != 1
+                and getattr(obj, "kind", None) != "cncjob"
+            ):
+                fc_units.scale_object_length_options(
+                    obj.options, factor, fc_units.OBJECT_LENGTH_OPTION_KEYS
+                )
             t3 = time.time()
             self.log.debug("%f seconds converting units." % (t3 - t2))
 
@@ -996,8 +1125,13 @@ class App(QtCore.QObject):
         return obj
 
     def options_read_form(self):
+        lu = dict(self.options.get("length_units") or {})
         for option in self.options_form_fields:
-            self.options[option] = self.options_form_fields[option].get_value()
+            field = self.options_form_fields[option]
+            self.options[option] = field.get_value()
+            if isinstance(field, LengthEntry):
+                lu[option] = field.display_units
+        self.options["length_units"] = lu
 
     def options_write_form(self):
         for option in self.options:
@@ -1005,7 +1139,10 @@ class App(QtCore.QObject):
 
     def options_write_form_field(self, field):
         try:
-            self.options_form_fields[field].set_value(self.options[field])
+            widget = self.options_form_fields[field]
+            if isinstance(widget, LengthEntry):
+                widget.display_units = fc_units.unit_for_option(self.options, field)
+            widget.set_value(self.options[field])
         except KeyError:
             # Changed from error to debug. This allows to have data stored
             # which is not user-editable.
@@ -1276,16 +1413,28 @@ class App(QtCore.QObject):
         self.defaults_write_form_field(field)
 
     def set_screen_units(self, units):
-        self.ui.units_label.setText("[" + self.options["units"].lower() + "]")
+        units = (units or self.options.get("units") or "MM").upper()
+        self.ui.units_label.setText("[" + units.lower() + "]")
+        self.refresh_display_units()
+
+    def refresh_display_units(self):
+        """Update plot tick labels and position readout; do not rescale data."""
+        units = (self.options.get("units") or "MM").upper()
+        try:
+            self.plotcanvas.set_display_units(units)
+        except Exception:
+            pass
+
+    def display_xy(self, x, y):
+        """Convert millimetre plot coordinates to display units."""
+        if str(self.options.get("units", "MM")).upper() == "IN":
+            return x * fc_units.INCH_PER_MM, y * fc_units.INCH_PER_MM
+        return x, y
 
     def on_toggle_units(self):
         """
-        Callback for the Units radio-button change in the Options tab.
-        Changes the application's default units or the current project's units.
-        If changing the project's units, the change propagates to all of
-        the objects in the project.
-
-        :return: None
+        Display / G-code units only. Does not scale tools or geometry.
+        Type ``0.005in`` or ``1.45mm`` in any length field.
         """
 
         self.report_usage("on_toggle_units")
@@ -1293,59 +1442,17 @@ class App(QtCore.QObject):
         if self.toggle_units_ignore:
             return
 
-        # If option is the same, then ignore
-        if self.options_form.units_radio.get_value().upper() == self.options['units'].upper():
+        chosen = self.options_form.units_radio.get_value().upper()
+        if chosen == str(self.options.get("units", "MM")).upper():
             self.log.debug("on_toggle_units(): Same as options, so ignoring.")
             return
 
-        # Scale only true dimensional options (never fractions like paintoverlap).
-        # The scaling factor depending on choice of units.
-        factor = 1 / 25.4
-        if self.options_form.units_radio.get_value().upper() == 'MM':
-            factor = 25.4
-
-        # Changing project units. Warn user.
-        msgbox = QtWidgets.QMessageBox()
-        msgbox.setText("<B>Change project units ...</B>")
-        msgbox.setInformativeText(
-            "Changing the units of the project scales geometry and dimensional "
-            "options (tool diameters, Z, feed). Unitless values (overlaps, passes) "
-            "are left unchanged. CNC G-code text is not rewritten — regenerate CNC "
-            "jobs after converting. Continue?"
+        self.options["units"] = chosen
+        self.set_screen_units(chosen)
+        self.inform.emit(
+            "Display/G-code units: %s. Tools and geometry are unchanged "
+            "(type 0.005in or 1.45mm in length fields)." % chosen
         )
-        msgbox.setStandardButtons(QtWidgets.QMessageBox.Cancel | QtWidgets.QMessageBox.Ok)
-        msgbox.setDefaultButton(QtWidgets.QMessageBox.Ok)
-
-        response = msgbox.exec()
-
-        if response == QtWidgets.QMessageBox.Ok:
-            self.options_read_form()
-            flatcam_defaults.scale_project_options(self.options, factor)
-            # Keep cutout tool dia in the dimensional set (was previously missed).
-            if "gerber_cutouttooldia" in self.options:
-                pass  # already scaled via DIMENSIONAL_OPTION_KEYS
-            self.options_write_form()
-            for obj in self.collection.get_list():
-                units = self.options_form.units_radio.get_value().upper()
-                obj.convert_units(units)
-            current = self.collection.get_active()
-            if current is not None:
-                current.to_form()
-            self.plot_all()
-            self.inform.emit("Converted units to %s" % self.options["units"])
-        else:
-            # Undo toggling
-            self.toggle_units_ignore = True
-            if self.options_form.units_radio.get_value().upper() == 'MM':
-                self.options_form.units_radio.set_value('IN')
-            else:
-                self.options_form.units_radio.set_value('MM')
-            self.toggle_units_ignore = False
-            self.inform.emit("Unit change cancelled.")
-
-        self.options_read_form()
-        #self.ui.units_label.setText("[" + self.options["units"] + "]")
-        self.set_screen_units(self.options["units"])
 
     def on_options_combo_change(self, sel):
         """
@@ -1376,14 +1483,12 @@ class App(QtCore.QObject):
         # except:
         #     pass
 
-        form = [self.defaults_form, self.options_form][sel]
-        # self.ui.notebook.options_contents.pack_start(form, False, False, 1)
-        try:
-            self.ui.options_scroll_area.takeWidget()
-        except:
-            self.log.debug("Nothing to remove")
-        self.ui.options_scroll_area.setWidget(form)
-        form.show()
+        stack = getattr(self, "options_stack", None)
+        if stack is not None:
+            stack.setCurrentIndex(int(sel))
+        else:
+            form = [self.defaults_form, self.options_form][sel]
+            park_scroll_widget(self.ui.options_scroll_area, form)
 
         # self.options2form()
 
@@ -1422,6 +1527,37 @@ class App(QtCore.QObject):
 
         self.inform.emit("Object deleted: %s" % name)
 
+    def delete_objects(self, objects, reset_editor=True):
+        """Unplot and remove the given objects from the project."""
+        names = []
+        for obj in list(objects):
+            if obj is None:
+                continue
+            try:
+                names.append(obj.options.get("name", "?"))
+            except Exception:
+                names.append("?")
+            if obj.options.get("plot") and getattr(obj, "axes", None) is not None:
+                try:
+                    if obj.axes in self.plotcanvas.figure.axes:
+                        self.plotcanvas.figure.delaxes(obj.axes)
+                except Exception:
+                    pass
+            self.collection.delete_object(obj)
+        if names:
+            if reset_editor:
+                self.setup_component_editor()
+            try:
+                self.plotcanvas.auto_adjust_axes()
+            except Exception:
+                pass
+            try:
+                self.stock.redraw()
+            except Exception:
+                pass
+            self.inform.emit("Cleared: %s" % ", ".join(names))
+        return names
+
     def on_plots_updated(self):
         """
         Callback used to report when the plots have changed.
@@ -1429,6 +1565,10 @@ class App(QtCore.QObject):
 
         :return: None
         """
+        try:
+            self.stock.redraw()
+        except Exception:
+            pass
         self.plotcanvas.auto_adjust_axes()
         self.on_zoom_fit(None)
 
@@ -1471,6 +1611,10 @@ class App(QtCore.QObject):
         self.new_object_available.emit(obj)
         if plot:
             obj.plot()
+        try:
+            self.stock.redraw()
+        except Exception:
+            pass
 
         # deselect all previously selected objects and select the new one
         self.collection.set_all_inactive()
@@ -1491,9 +1635,20 @@ class App(QtCore.QObject):
         :return: None
         """
 
-        xmin, ymin, xmax, ymax = self.collection.get_bounds()
+        box = None
+        try:
+            box = self.stock.zoom_bounds()
+        except Exception:
+            box = None
+        if box is None:
+            xmin, ymin, xmax, ymax = self.collection.get_bounds()
+        else:
+            xmin, ymin, xmax, ymax = box
         width = xmax - xmin
         height = ymax - ymin
+        if width <= 0 or height <= 0 or width != width:
+            xmin, ymin, xmax, ymax = 0.0, 0.0, 1.0, 1.0
+            width = height = 1.0
         xmin -= 0.05 * width
         xmax += 0.05 * width
         ymin -= 0.05 * height
@@ -1560,7 +1715,8 @@ class App(QtCore.QObject):
                 event.button, event.x, event.y, event.xdata, event.ydata))
             modifiers = QtWidgets.QApplication.keyboardModifiers()
             if modifiers == QtCore.Qt.ControlModifier:
-                self.clipboard.setText(self.defaults["point_clipboard_format"] % (event.xdata, event.ydata))
+                dx, dy = self.display_xy(event.xdata, event.ydata)
+                self.clipboard.setText(self.defaults["point_clipboard_format"] % (dx, dy))
 
         except Exception as e:
             App.log.debug("Outside plot?")
@@ -1577,8 +1733,8 @@ class App(QtCore.QObject):
         """
 
         try:  # May fail in case mouse not within axes
-            self.ui.position_label.setText("X: %.4f   Y: %.4f" % (
-                event.xdata, event.ydata))
+            dx, dy = self.display_xy(event.xdata, event.ydata)
+            self.ui.position_label.setText("X: %.4f   Y: %.4f" % (dx, dy))
             self.mouse = [event.xdata, event.ydata]
 
         except:
@@ -1612,6 +1768,12 @@ class App(QtCore.QObject):
 
         # Re-fresh project options
         self.on_options_app2project()
+        try:
+            self.stock.redraw()
+            if getattr(self, "stock_tool", None) is not None:
+                self.stock_tool.load_from_app()
+        except Exception:
+            pass
 
     def on_fileopengerber(self):
         """
@@ -2124,6 +2286,9 @@ class App(QtCore.QObject):
 
         ##Project options
         self.options.update(d['options'])
+        fc_units.migrate_storage_to_mm(
+            self.options, flatcam_defaults.DIMENSIONAL_OPTION_KEYS
+        )
         self.project_filename = filename
         #self.ui.units_label.setText("[" + self.options["units"] + "]")
         self.set_screen_units(self.options["units"])
@@ -4101,9 +4266,9 @@ class App(QtCore.QObject):
         # self.ui.recent.show()
 
     def setup_component_editor(self):
-        label = QtWidgets.QLabel("Choose an item from Project")
-        label.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
-        self.ui.selected_scroll_area.setWidget(label)
+        park_scroll_widget(
+            self.ui.selected_scroll_area, self.ui.selected_placeholder
+        )
 
     def setup_obj_classes(self):
         """

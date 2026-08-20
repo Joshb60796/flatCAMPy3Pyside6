@@ -92,6 +92,7 @@ class FlatCAMGUI(QtWidgets.QMainWindow):
         ### Edit ###
         self.menuedit = self.menu.addMenu('&Edit')
         self.menueditnew = self.menuedit.addAction(QtGui.QIcon('share/new_geo16.png'), 'New Geometry')
+        self.menueditnewexc = self.menuedit.addAction(QtGui.QIcon('share/drill16.png'), 'New Excellon')
         self.menueditedit = self.menuedit.addAction(QtGui.QIcon('share/edit16.png'), 'Edit Geometry')
         self.menueditok = self.menuedit.addAction(QtGui.QIcon('share/edit_ok16.png'), 'Update Geometry')
         # Separator
@@ -117,6 +118,22 @@ class FlatCAMGUI(QtWidgets.QMainWindow):
         self.menuviewdisableother = self.menuview.addAction(QtGui.QIcon('share/clear_plot16.png'),
                                                             'Disable all plots but this one')
         self.menuviewenable = self.menuview.addAction(QtGui.QIcon('share/replot16.png'), 'Enable all plots')
+        self.menuview.addSeparator()
+        self.menuview_dark = QtGui.QAction('Dark mode', self)
+        self.menuview_dark.setCheckable(True)
+        self.menuview_dark.setToolTip(
+            "Dark window, notebook, and plot.\n"
+            "Text stays light so nothing is black-on-black."
+        )
+        self.menuview.addAction(self.menuview_dark)
+        self.menuview_stock = QtGui.QAction('Show PCB material', self)
+        self.menuview_stock.setCheckable(True)
+        self.menuview_stock.setChecked(True)
+        self.menuview_stock.setToolTip(
+            "Draw the PCB stock rectangle at (0, 0)\n"
+            "so you can see if Gerber, drills, and G-code fit."
+        )
+        self.menuview.addAction(self.menuview_stock)
 
         ### Tool ###
 
@@ -153,6 +170,7 @@ class FlatCAMGUI(QtWidgets.QMainWindow):
         self.toolbareditobj = QtWidgets.QToolBar('Obj.Editor Toolbar')
         self.addToolBar(self.toolbareditobj)
         self.newgeo_btn = self.toolbareditobj.addAction(QtGui.QIcon('share/new_geo32.png'), "New Blank Geometry")
+        self.newexc_btn = self.toolbareditobj.addAction(QtGui.QIcon('share/drill32.png'), "New Blank Excellon")
         self.editgeo_btn = self.toolbareditobj.addAction(QtGui.QIcon('share/edit32.png'), "Edit Geometry")
         self.updategeo_btn = self.toolbareditobj.addAction(QtGui.QIcon('share/edit_ok32.png'), "Update Geometry")
         self.updategeo_btn.setEnabled(False)
@@ -165,6 +183,7 @@ class FlatCAMGUI(QtWidgets.QMainWindow):
         self.addToolBar(self.toolbartools)
         self.shell_btn = self.toolbartools.addAction(QtGui.QIcon('share/shell32.png'), "&Command Line")
         self.measure_btn = self.toolbartools.addAction(QtGui.QIcon('share/measure32.png'), "&Measurement Tool")
+        self.stock_btn = self.toolbartools.addAction(QtGui.QIcon('share/rectangle32.png'), "PCB &Material")
 
         ################
         ### Splitter ###
@@ -192,6 +211,11 @@ class FlatCAMGUI(QtWidgets.QMainWindow):
         self.selected_tab_layout.setContentsMargins(2, 2, 2, 2)
         self.selected_scroll_area = VerticalScrollArea()
         self.selected_tab_layout.addWidget(self.selected_scroll_area)
+        self.selected_placeholder = QtWidgets.QLabel("Choose an item from Project")
+        self.selected_placeholder.setAlignment(
+            QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter
+        )
+        self.selected_scroll_area.setWidget(self.selected_placeholder)
         self.notebook.addTab(self.selected_tab, "Selected")
 
         ### Options ###
@@ -378,13 +402,9 @@ class FlatCAMInfoBar(QtWidgets.QWidget):
 class OptionsGroupUI(QtWidgets.QGroupBox):
     def __init__(self, title, parent=None):
         QtWidgets.QGroupBox.__init__(self, title, parent=parent)
-        self.setStyleSheet("""
-        QGroupBox
-        {
-            font-size: 16px;
-            font-weight: bold;
-        }
-        """)
+        # Title size comes from the app theme (QGroupBox). Do not call
+        # setFont() here: that font is inherited by every child after a
+        # reparent, which shrinks Application Defaults to match Project Options.
 
         self.layout = QtWidgets.QVBoxLayout()
         self.setLayout(self.layout)
@@ -432,7 +452,7 @@ class GerberOptionsGroupUI(OptionsGroupUI):
 
         grid1 = QtWidgets.QGridLayout()
         self.layout.addLayout(grid1)
-        tdlabel = QtWidgets.QLabel('Tool dia (mm/in):')
+        tdlabel = QtWidgets.QLabel('Tool dia:')
         tdlabel.setToolTip(
             "Effective isolation kerf diameter in project units.\n"
             "Default: 0.003\" tip 30° V-bit (≈0.076 mm), 1/8\" shank."
@@ -476,7 +496,7 @@ class GerberOptionsGroupUI(OptionsGroupUI):
 
         grid2 = QtWidgets.QGridLayout()
         self.layout.addLayout(grid2)
-        tdclabel = QtWidgets.QLabel('Tool dia (mm/in):')
+        tdclabel = QtWidgets.QLabel('Tool dia:')
         tdclabel.setToolTip(
             "Cutout endmill diameter in project units.\n"
             "Default: 1/32\" (≈0.794 mm), 1/8\" shank, 1/8\" LOC."
@@ -653,6 +673,23 @@ class ExcellonOptionsGroupUI(OptionsGroupUI):
         self.spindlespeed_entry = IntEntry(allow_empty=True)
         grid1.addWidget(self.spindlespeed_entry, 4, 1)
 
+        mpasslabel = QtWidgets.QLabel('Peck / Multi-Depth:')
+        mpasslabel.setToolTip(
+            "Peck-drill in steps of Depth/peck."
+        )
+        grid1.addWidget(mpasslabel, 5, 0)
+        self.mpass_cb = FCCheckBox()
+        grid1.addWidget(self.mpass_cb, 5, 1)
+
+        maxdepthlabel = QtWidgets.QLabel('Depth/peck:')
+        maxdepthlabel.setToolTip(
+            "Positive peck step."
+        )
+        grid1.addWidget(maxdepthlabel, 6, 0)
+        self.maxdepth_entry = LengthEntry()
+        grid1.addWidget(self.maxdepth_entry, 6, 1)
+        self.ois_mpass = OptionalInputSection(self.mpass_cb, [self.maxdepth_entry])
+
         #### Milling Holes ####
         self.mill_hole_label = QtWidgets.QLabel('<b>Mill Holes</b>')
         self.mill_hole_label.setToolTip(
@@ -749,6 +786,37 @@ class GeometryOptionsGroupUI(OptionsGroupUI):
         grid1.addWidget(spdlabel, 4, 0)
         self.cncspindlespeed_entry = IntEntry(allow_empty=True)
         grid1.addWidget(self.cncspindlespeed_entry, 4, 1)
+
+        mpasslabel = QtWidgets.QLabel('Multi-Depth:')
+        mpasslabel.setToolTip(
+            "Use multiple passes to reach Cut Z.\n"
+            "Needed for small bits (e.g. 1/32\")\n"
+            "on deeper profile / pocket cuts."
+        )
+        grid1.addWidget(mpasslabel, 5, 0)
+        self.mpass_cb = FCCheckBox()
+        grid1.addWidget(self.mpass_cb, 5, 1)
+
+        maxdepthlabel = QtWidgets.QLabel('Depth/pass:')
+        maxdepthlabel.setToolTip(
+            "Depth of each pass (positive)."
+        )
+        grid1.addWidget(maxdepthlabel, 6, 0)
+        self.maxdepth_entry = LengthEntry()
+        grid1.addWidget(self.maxdepth_entry, 6, 1)
+        self.ois_mpass = OptionalInputSection(self.mpass_cb, [self.maxdepth_entry])
+
+        offsetlabel = QtWidgets.QLabel('Trace offset:')
+        offsetlabel.setToolTip(
+            "Tool centreline vs traced polygons."
+        )
+        grid1.addWidget(offsetlabel, 7, 0)
+        self.traceoffset_radio = RadioSet([
+            {"label": "Center", "value": "center"},
+            {"label": "Inside", "value": "inside"},
+            {"label": "Outside", "value": "outside"},
+        ])
+        grid1.addWidget(self.traceoffset_radio, 7, 1)
 
         # ------------------------------
         ## Paint area
@@ -940,7 +1008,12 @@ class GlobalOptionsUI(QtWidgets.QWidget):
 
         hlay1 = QtWidgets.QHBoxLayout()
         layout.addLayout(hlay1)
-        unitslabel = QtWidgets.QLabel('Units:')
+        unitslabel = QtWidgets.QLabel('Display / G-code:')
+        unitslabel.setToolTip(
+            "Plot labels and exported G-code (G20/G21) only.\n"
+            "Does not convert tools or loaded files.\n"
+            "Type 0.005in, 1/32in, or 1.45mm in any length field."
+        )
         hlay1.addWidget(unitslabel)
         self.units_radio = RadioSet([{'label': 'inch', 'value': 'IN'},
                                      {'label': 'mm', 'value': 'MM'}])

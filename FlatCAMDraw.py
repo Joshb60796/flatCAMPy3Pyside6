@@ -580,6 +580,28 @@ class FCPath(FCPolygon):
                 self.points = self.points[0:-1]
 
 
+class FCPoint(FCShapeTool):
+    """Resulting type: Point (drill / plunge)."""
+
+    def __init__(self, draw_app):
+        DrawTool.__init__(self, draw_app)
+        self.start_msg = "Click to place a point ..."
+
+    def click(self, point):
+        self.points.append(point)
+        self.make()
+        return "Done."
+
+    def utility_geometry(self, data=None):
+        if data is not None:
+            return DrawToolUtilityShape(Point(data))
+        return None
+
+    def make(self):
+        self.geometry = DrawToolShape(Point(self.points[0]))
+        self.complete = True
+
+
 class FCSelect(DrawTool):
     def __init__(self, draw_app):
         DrawTool.__init__(self, draw_app)
@@ -700,6 +722,7 @@ class FlatCAMDraw(QtCore.QObject):
         self.add_rectangle_btn = self.drawing_toolbar.addAction(QtGui.QIcon('share/rectangle32.png'), 'Add Rectangle')
         self.add_polygon_btn = self.drawing_toolbar.addAction(QtGui.QIcon('share/polygon32.png'), 'Add Polygon')
         self.add_path_btn = self.drawing_toolbar.addAction(QtGui.QIcon('share/path32.png'), 'Add Path')
+        self.add_point_btn = self.drawing_toolbar.addAction(QtGui.QIcon('share/drill32.png'), 'Add Point')
 
         # Separator
         self.drawing_toolbar.addSeparator()
@@ -798,6 +821,8 @@ class FlatCAMDraw(QtCore.QObject):
                         "constructor": FCPolygon},
             "path": {"button": self.add_path_btn,
                      "constructor": FCPath},
+            "point": {"button": self.add_point_btn,
+                      "constructor": FCPoint},
             "move": {"button": self.move_btn,
                      "constructor": FCMove},
             "copy": {"button": self.copy_btn,
@@ -1116,8 +1141,10 @@ class FlatCAMDraw(QtCore.QObject):
             # Efficient plotting for fast animation
 
             #self.canvas.canvas.restore_region(self.canvas.background)
+            spec = self._draw_style("utility")
             elements = self.plot_shape(geometry=geo.geo,
-                                       linespec="b--",
+                                       color=spec["color"],
+                                       linestyle="--",
                                        linewidth=1,
                                        animated=True)
             for el in elements:
@@ -1125,7 +1152,8 @@ class FlatCAMDraw(QtCore.QObject):
             #self.canvas.canvas.blit(self.axes.bbox)
 
         # Pointer (snapped)
-        elements = self.axes.plot(x, y, 'bo', animated=True)
+        spec = self._draw_style("normal")
+        elements = self.axes.plot(x, y, 'o', color=spec["color"], animated=True)
         for el in elements:
                 self.axes.draw_artist(el)
 
@@ -1224,7 +1252,25 @@ class FlatCAMDraw(QtCore.QObject):
 
         self.selected = []
 
-    def plot_shape(self, geometry=None, linespec='b-', linewidth=1, animated=False):
+    def _draw_style(self, role="normal"):
+        try:
+            import theme as fc_theme
+            return fc_theme.draw_linespec(
+                role, dark=bool(getattr(self.app, "dark_mode", False))
+            )
+        except Exception:
+            fallback = {
+                "normal": {"color": "#1f77b4", "linestyle": "-", "linewidth": 1},
+                "selected": {"color": "#000000", "linestyle": "-", "linewidth": 2},
+                "utility": {"color": "#444444", "linestyle": "--", "linewidth": 1},
+            }
+            if getattr(self.app, "dark_mode", False):
+                fallback["selected"]["color"] = "#ffe66d"
+                fallback["utility"]["color"] = "#ffb347"
+            return fallback.get(role, fallback["normal"])
+
+    def plot_shape(self, geometry=None, linespec=None, linewidth=1, animated=False,
+                   color=None, linestyle=None):
         """
         Plots a geometric object or list of objects without rendering. Plotted objects
         are returned as a list. This allows for efficient/animated rendering.
@@ -1236,24 +1282,35 @@ class FlatCAMDraw(QtCore.QObject):
         :return: List of plotted elements.
         """
         plot_elements = []
+        if color is None or linestyle is None:
+            spec = self._draw_style("normal")
+            if color is None:
+                color = spec["color"]
+            if linestyle is None:
+                linestyle = spec["linestyle"]
+
+        extra = dict(
+            geometry=None,
+            linespec=linespec,
+            linewidth=linewidth,
+            animated=animated,
+            color=color,
+            linestyle=linestyle,
+        )
 
         if geometry is None:
             geometry = self.active_tool.geometry
 
         ## DrawToolShape
         if isinstance(geometry, DrawToolShape):
-            return self.plot_shape(geometry=geometry.geo,
-                                   linespec=linespec,
-                                   linewidth=linewidth,
-                                   animated=animated)
+            extra["geometry"] = geometry.geo
+            return self.plot_shape(**extra)
 
         # Nested lists
         if isinstance(geometry, (list, tuple)):
             for geo in geometry:
-                plot_elements += self.plot_shape(geometry=geo,
-                                                 linespec=linespec,
-                                                 linewidth=linewidth,
-                                                 animated=animated)
+                extra["geometry"] = geo
+                plot_elements += self.plot_shape(**extra)
             return plot_elements
 
         # Shapely geometries (expand Multi* — not iterable in Shapely 2)
@@ -1261,29 +1318,24 @@ class FlatCAMDraw(QtCore.QObject):
             for part in to_geometry_list(geometry):
                 gtype = getattr(part, "geom_type", None)
                 if gtype == "Polygon":
-                    plot_elements += self.plot_shape(
-                        geometry=part.exterior,
-                        linespec=linespec,
-                        linewidth=linewidth,
-                        animated=animated,
-                    )
+                    extra["geometry"] = part.exterior
+                    plot_elements += self.plot_shape(**extra)
                     for interior in part.interiors:
-                        plot_elements += self.plot_shape(
-                            geometry=interior,
-                            linespec=linespec,
-                            linewidth=linewidth,
-                            animated=animated,
-                        )
+                        extra["geometry"] = interior
+                        plot_elements += self.plot_shape(**extra)
                 elif gtype in ("LineString", "LinearRing"):
                     x, y = part.coords.xy
-                    element, = self.axes.plot(
-                        x, y, linespec, linewidth=linewidth, animated=animated
-                    )
+                    kw = {"linewidth": linewidth, "animated": animated, "color": color,
+                          "linestyle": linestyle}
+                    if linespec:
+                        element, = self.axes.plot(x, y, linespec, **kw)
+                    else:
+                        element, = self.axes.plot(x, y, **kw)
                     plot_elements.append(element)
                 elif gtype == "Point":
                     x, y = part.coords.xy
                     element, = self.axes.plot(
-                        x, y, 'bo', linewidth=linewidth, animated=animated
+                        x, y, "o", color=color, linewidth=linewidth, animated=animated
                     )
                     plot_elements.append(element)
 
@@ -1299,19 +1351,29 @@ class FlatCAMDraw(QtCore.QObject):
         """
         self.app.log.debug("plot_all()")
         self.axes.cla()
+        try:
+            import theme as fc_theme
+            fc_theme.style_matplotlib_axes(
+                self.axes, self.canvas.figure,
+                dark=bool(getattr(self.app, "dark_mode", False)),
+            )
+        except Exception:
+            pass
 
         for shape in self.storage.get_objects():
             if shape.geo is None:  # TODO: This shouldn't have happened
                 continue
 
             if shape in self.selected:
-                self.plot_shape(geometry=shape.geo, linespec='k-', linewidth=2)
+                spec = self._draw_style("selected")
+                self.plot_shape(geometry=shape.geo, **spec)
                 continue
 
             self.plot_shape(geometry=shape.geo)
 
         for shape in self.utility:
-            self.plot_shape(geometry=shape.geo, linespec='k--', linewidth=1)
+            spec = self._draw_style("utility")
+            self.plot_shape(geometry=shape.geo, **spec)
             continue
 
         self.canvas.auto_adjust_axes()

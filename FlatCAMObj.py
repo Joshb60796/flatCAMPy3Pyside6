@@ -10,7 +10,7 @@ from ObjectUI import *
 import FlatCAMApp
 import inspect  # TODO: For debugging only.
 from camlib import *
-from FlatCAMCommon import LoudDict
+from FlatCAMCommon import LoudDict, park_scroll_widget, qt_widget_alive
 from FlatCAMDraw import FlatCAMDraw
 import flatcam_defaults
 
@@ -77,6 +77,7 @@ class FlatCAMObj(QtCore.QObject):
                 self.options.update(d[attr])
             else:
                 setattr(self, attr, d[attr])
+        self._loaded_from_project = True
 
     def on_options_change(self, key):
         #self.emit(QtCore.SIGNAL("optionChanged()"), key)
@@ -226,11 +227,10 @@ class FlatCAMObj(QtCore.QObject):
         # box_selected.pack_start(sw, True, True, 0)
         # self.app.ui.notebook.selected_contents.add(self.ui)
         # self.app.ui.selected_layout.addWidget(self.ui)
-        try:
-            self.app.ui.selected_scroll_area.takeWidget()
-        except:
-            self.app.log.debug("Nothing to remove")
-        self.app.ui.selected_scroll_area.setWidget(self.ui)
+        if not qt_widget_alive(self.ui):
+            FlatCAMApp.App.log.debug("build_ui(): recreating deleted ObjectUI")
+            self.set_ui(self.ui_type())
+        park_scroll_widget(self.app.ui.selected_scroll_area, self.ui)
         self.to_form()
 
         self.muted_ui = False
@@ -244,8 +244,15 @@ class FlatCAMObj(QtCore.QObject):
         :return: None
         """
 
+        if option in ("length_units", "storage_units"):
+            return
         try:
-            self.form_fields[option].set_value(self.options[option])
+            widget = self.form_fields[option]
+            from GUIElements import LengthEntry
+            import units as fc_units
+            if isinstance(widget, LengthEntry):
+                widget.display_units = fc_units.unit_for_option(self.options, option)
+            widget.set_value(self.options[option])
         except KeyError:
             self.app.log.warning("Tried to set an option or field that does not exist: %s" % option)
 
@@ -259,7 +266,13 @@ class FlatCAMObj(QtCore.QObject):
         """
 
         try:
-            self.options[option] = self.form_fields[option].get_value()
+            widget = self.form_fields[option]
+            self.options[option] = widget.get_value()
+            from GUIElements import LengthEntry
+            if isinstance(widget, LengthEntry):
+                lu = dict(self.options.get("length_units") or {})
+                lu[option] = widget.display_units
+                self.options["length_units"] = lu
         except KeyError:
             self.app.log.warning("Failed to read option from field: %s" % option)
 
@@ -474,6 +487,7 @@ class FlatCAMGerber(FlatCAMObj, Gerber):
         self.ui.solid_cb.stateChanged.connect(self.on_solid_cb_click)
         self.ui.multicolored_cb.stateChanged.connect(self.on_multicolored_cb_click)
         self.ui.generate_iso_button.clicked.connect(self.on_iso_button_click)
+        self.ui.follow_button.clicked.connect(self.on_follow_button_click)
         self.ui.generate_cutout_button.clicked.connect(self.on_generatecutout_button_click)
         self.ui.generate_bb_button.clicked.connect(self.on_generatebb_button_click)
         self.ui.generate_noncopper_button.clicked.connect(self.on_generatenoncopper_button_click)
@@ -516,38 +530,15 @@ class FlatCAMGerber(FlatCAMObj, Gerber):
         name = self.options["name"] + "_cutout"
 
         def geo_init(geo_obj, app_obj):
-            margin = self.options["cutoutmargin"] + self.options["cutouttooldia"]/2
-            gap_size = self.options["cutoutgapsize"] + self.options["cutouttooldia"]
-            minx, miny, maxx, maxy = self.bounds()
-            minx -= margin
-            maxx += margin
-            miny -= margin
-            maxy += margin
-            midx = 0.5 * (minx + maxx)
-            midy = 0.5 * (miny + maxy)
-            hgap = 0.5 * gap_size
-            pts = [[midx - hgap, maxy],
-                   [minx, maxy],
-                   [minx, midy + hgap],
-                   [minx, midy - hgap],
-                   [minx, miny],
-                   [midx - hgap, miny],
-                   [midx + hgap, miny],
-                   [maxx, miny],
-                   [maxx, midy - hgap],
-                   [maxx, midy + hgap],
-                   [maxx, maxy],
-                   [midx + hgap, maxy]]
-            cases = {"tb": [[pts[0], pts[1], pts[4], pts[5]],
-                            [pts[6], pts[7], pts[10], pts[11]]],
-                     "lr": [[pts[9], pts[10], pts[1], pts[2]],
-                            [pts[3], pts[4], pts[7], pts[8]]],
-                     "4": [[pts[0], pts[1], pts[2]],
-                           [pts[3], pts[4], pts[5]],
-                           [pts[6], pts[7], pts[8]],
-                           [pts[9], pts[10], pts[11]]]}
-            cuts = cases[self.options['gaps']]
-            geo_obj.solid_geometry = unary_union([LineString(segment) for segment in cuts])
+            # Copy endmill dia onto the geometry; default cnctooldia is the V-bit tip.
+            init_board_cutout(
+                geo_obj,
+                self.bounds(),
+                self.options["cutouttooldia"],
+                margin=self.options["cutoutmargin"],
+                gapsize=self.options["cutoutgapsize"],
+                gaps=self.options["gaps"],
+            )
 
         # TODO: Check for None
         self.app.new_object("geometry", name, geo_init)
@@ -556,6 +547,11 @@ class FlatCAMGerber(FlatCAMObj, Gerber):
         self.app.report_usage("gerber_on_iso_button")
         self.read_form()
         self.isolate()
+
+    def on_follow_button_click(self, *args):
+        self.app.report_usage("gerber_on_follow_button")
+        self.read_form()
+        self.follow()
 
     def follow(self, outname=None):
         """
@@ -697,21 +693,8 @@ class FlatCAMGerber(FlatCAMObj, Gerber):
         :rtype: None
         """
 
-        factor = Gerber.convert_units(self, units)
-
-        for key in (
-            "isotooldia",
-            "cutouttooldia",
-            "cutoutmargin",
-            "cutoutgapsize",
-            "noncoppermargin",
-            "bboxmargin",
-        ):
-            if key in self.options and self.options[key] is not None:
-                try:
-                    self.options[key] = float(self.options[key]) * factor
-                except (TypeError, ValueError):
-                    pass
+        # Geometry only. CAM options are always millimetres.
+        return Gerber.convert_units(self, units)
 
     def plot(self):
 
@@ -729,6 +712,13 @@ class FlatCAMGerber(FlatCAMObj, Gerber):
         face = self.options.get("plot_fill") or defaults["facecolor"]
         edge = self.options.get("plot_edge") or defaults["edgecolor"]
         line = self.options.get("plot_line") or defaults["linecolor"]
+        try:
+            import theme as fc_theme
+            line = fc_theme.resolve_gerber_linecolor(
+                line, dark=bool(getattr(self.app, "dark_mode", False))
+            )
+        except Exception:
+            pass
 
         if self.options["solid"]:
             for poly in geometry:
@@ -801,6 +791,8 @@ class FlatCAMExcellon(FlatCAMObj, Excellon):
             "toolchange": cam.get("toolchange", False),
             "toolchangez": cam.get("toolchangez", 15.0),
             "spindlespeed": cam.get("spindlespeed", None),
+            "multidepth": cam.get("multidepth", False),
+            "depthperpass": cam.get("depthperpass", 0.4),
         })
 
         # TODO: Document this.
@@ -956,7 +948,9 @@ class FlatCAMExcellon(FlatCAMObj, Excellon):
             "tooldia": self.ui.tooldia_entry,
             "toolchange": self.ui.toolchange_cb,
             "toolchangez": self.ui.toolchangez_entry,
-            "spindlespeed": self.ui.spindlespeed_entry
+            "spindlespeed": self.ui.spindlespeed_entry,
+            "multidepth": self.ui.mpass_cb,
+            "depthperpass": self.ui.maxdepth_entry,
         })
 
         assert isinstance(self.ui, ExcellonObjectUI), \
@@ -965,6 +959,11 @@ class FlatCAMExcellon(FlatCAMObj, Excellon):
         self.ui.solid_cb.stateChanged.connect(self.on_solid_cb_click)
         self.ui.generate_cnc_button.clicked.connect(self.on_create_cncjob_button_click)
         self.ui.generate_milling_button.clicked.connect(self.on_generate_milling_button_click)
+        self.ui.add_tool_button.clicked.connect(self.on_add_tool_button_click)
+        self.ui.place_points_btn.toggled.connect(self.on_place_points_toggled)
+        if not str(self.ui.add_drill_dia_entry.text()).strip():
+            self.ui.add_drill_dia_entry.set_value(self.options.get("tooldia", 0.8))
+        self._place_cid = None
 
     def get_selected_tools_list(self):
         """
@@ -1081,9 +1080,13 @@ class FlatCAMExcellon(FlatCAMObj, Excellon):
             # job_obj.options["tooldia"] =
 
             tools_csv = ','.join(tools)
-            job_obj.generate_from_excellon_by_tool(self, tools_csv,
-                                                   toolchange=self.options["toolchange"],
-                                                   toolchangez=self.options["toolchangez"])
+            job_obj.generate_from_excellon_by_tool(
+                self, tools_csv,
+                toolchange=self.options["toolchange"],
+                toolchangez=self.options["toolchangez"],
+                multidepth=self.options.get("multidepth", False),
+                depthpercut=self.options.get("depthperpass"),
+            )
 
             app_obj.progress.emit(50)
             job_obj.gcode_parse()
@@ -1118,14 +1121,77 @@ class FlatCAMExcellon(FlatCAMObj, Excellon):
         self.plot()
 
     def convert_units(self, units):
-        factor = Excellon.convert_units(self, units)
+        return Excellon.convert_units(self, units)
 
-        for key in ("drillz", "travelz", "feedrate", "toolchangez", "tooldia"):
-            if key in self.options and self.options[key] is not None:
-                try:
-                    self.options[key] = float(self.options[key]) * factor
-                except (TypeError, ValueError):
-                    pass
+    def _read_add_drill_dia(self):
+        try:
+            dia = self.ui.add_drill_dia_entry.get_value()
+        except Exception:
+            dia = None
+        return dia
+
+    def on_add_tool_button_click(self, *args):
+        self.read_form()
+        dia = self._read_add_drill_dia()
+        if dia is None or float(dia) <= 0:
+            self.app.inform.emit("[warning] Enter a positive drill diameter.")
+            return
+        name = self.ensure_tool(dia)
+        self.build_ui()
+        self.app.inform.emit("Added tool %s  dia=%.4f" % (name, float(dia)))
+
+    def _stop_placing_points(self):
+        cid = getattr(self, "_place_cid", None)
+        if cid is not None:
+            try:
+                self.app.plotcanvas.mpl_disconnect(cid)
+            except Exception:
+                pass
+            self._place_cid = None
+        if getattr(self, "ui", None) is not None:
+            try:
+                self.ui.place_points_btn.blockSignals(True)
+                self.ui.place_points_btn.setChecked(False)
+                self.ui.place_points_btn.blockSignals(False)
+            except Exception:
+                pass
+
+    def on_place_points_toggled(self, checked):
+        if not checked:
+            self._stop_placing_points()
+            self.app.inform.emit("Stopped placing drill points.")
+            return
+        dia = self._read_add_drill_dia()
+        if dia is None or float(dia) <= 0:
+            self.app.inform.emit("[warning] Enter a positive drill diameter.")
+            self._stop_placing_points()
+            return
+        self.app.inform.emit(
+            "Click the plot to add drills (dia=%s). Toggle the button off to stop." % dia
+        )
+        self._place_cid = self.app.plotcanvas.mpl_connect(
+            'button_press_event', self._on_place_point_click
+        )
+
+    def _on_place_point_click(self, event):
+        if self.app.collection.get_active() is not self:
+            self._stop_placing_points()
+            return
+        if getattr(event, "button", 1) != 1:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        dia = self._read_add_drill_dia()
+        if dia is None or float(dia) <= 0:
+            self.app.inform.emit("[warning] Enter a positive drill diameter.")
+            return
+        tool = self.add_drill(event.xdata, event.ydata, diameter=float(dia))
+        self.build_ui()
+        self.plot()
+        self.app.inform.emit(
+            "Added drill (%.4f, %.4f) tool %s dia=%.4f"
+            % (event.xdata, event.ydata, tool, float(dia))
+        )
 
     def plot(self):
 
@@ -1238,18 +1304,18 @@ class FlatCAMCNCjob(FlatCAMObj, CNCjob):
 
         self.read_form()
 
-        # Suggest object name with a .gcode extension under the last folder used.
+        # Suggest object name with a .nc extension under the last folder used.
         last_folder = self.app.defaults.get("last_folder") or ""
         base_name = self.options.get("name") or "output"
         # Strip a previous extension if the object name already has one.
-        suggested = os.path.splitext(base_name)[0] + ".gcode"
+        suggested = os.path.splitext(base_name)[0] + ".nc"
         start_path = os.path.join(last_folder, suggested) if last_folder else suggested
 
         file_filter = (
+            "NC (*.nc);;"
             "G-Code (*.gcode *.nc *.ngc *.tap);;"
             "G-Code (*.gcode);;"
             "LinuxCNC / EMC (*.ngc);;"
-            "NC (*.nc);;"
             "All files (*.*)"
         )
         path, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
@@ -1265,11 +1331,11 @@ class FlatCAMCNCjob(FlatCAMObj, CNCjob):
         # If the user typed a bare name (no extension), append one from the filter.
         root, ext = os.path.splitext(filename)
         if not ext:
-            # Prefer extension mentioned in the selected filter, else .gcode.
-            filter_ext = ".gcode"
+            # Prefer extension mentioned in the selected filter, else .nc.
+            filter_ext = ".nc"
             if selected_filter:
                 # e.g. "LinuxCNC / EMC (*.ngc)" -> .ngc
-                for candidate in (".gcode", ".ngc", ".nc", ".tap"):
+                for candidate in (".nc", ".gcode", ".ngc", ".tap"):
                     if candidate in selected_filter.lower():
                         filter_ext = candidate
                         break
@@ -1293,6 +1359,11 @@ class FlatCAMCNCjob(FlatCAMObj, CNCjob):
     def export_gcode(self, filename, preamble='', postamble='', processor=''):
         dwell = bool(self.options.get("dwell"))
         dwelltime = self.options.get("dwelltime", 1)
+        export_units = None
+        try:
+            export_units = self.app.options.get("units")
+        except Exception:
+            export_units = None
         CNCjob.export_gcode(
             self,
             filename,
@@ -1300,6 +1371,7 @@ class FlatCAMCNCjob(FlatCAMObj, CNCjob):
             postamble=postamble,
             dwell=dwell,
             dwelltime=dwelltime,
+            export_units=export_units,
         )
 
         # Just for adding it to the recent files list.
@@ -1307,13 +1379,22 @@ class FlatCAMCNCjob(FlatCAMObj, CNCjob):
 
         self.app.inform.emit("Saved to: " + filename)
 
-    def get_gcode(self, preamble='', postamble=''):
+    def get_gcode(self, preamble='', postamble='', dwell=None, dwelltime=None,
+                  export_units=None, **kwargs):
         # Shared with the Tcl export_gcode command; must apply the same
         # dwell / preamble safety rules as writing a file.
-        dwell = bool(self.options.get("dwell"))
-        dwelltime = self.options.get("dwelltime", 1)
+        if dwell is None:
+            dwell = bool(self.options.get("dwell"))
+        if dwelltime is None:
+            dwelltime = self.options.get("dwelltime", 1)
+        if export_units is None:
+            try:
+                export_units = self.app.options.get("units")
+            except Exception:
+                export_units = None
         return CNCjob.get_gcode(
-            self, preamble, postamble, dwell=dwell, dwelltime=dwelltime
+            self, preamble, postamble, dwell=dwell, dwelltime=dwelltime,
+            export_units=export_units,
         )
 
     def on_plot_cb_click(self, *args):
@@ -1334,9 +1415,12 @@ class FlatCAMCNCjob(FlatCAMObj, CNCjob):
         self.app.plotcanvas.auto_adjust_axes()
 
     def convert_units(self, units):
+        # G-code / z_cut / self.tooldia follow the job. options["tooldia"]
+        # stays millimetres (LengthEntry storage). Scaling it here made
+        # save+reload apply 25.4 twice after read_form wrote mm back.
         factor = CNCjob.convert_units(self, units)
         FlatCAMApp.App.log.debug("FlatCAMCNCjob.convert_units()")
-        self.options["tooldia"] *= factor
+        return factor
 
 
 class FlatCAMGeometry(FlatCAMObj, Geometry):
@@ -1409,6 +1493,7 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
             "paintcontour": cam.get("paintcontour", True),
             "multidepth": cam.get("multidepth", False),
             "depthperpass": cam.get("depthperpass", 0.2),
+            "traceoffset": cam.get("traceoffset", "center"),
             "selectmethod": cam.get("selectmethod", "single"),
         })
 
@@ -1443,6 +1528,7 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
             "paintcontour": self.ui.paintcontour_cb,
             "multidepth": self.ui.mpass_cb,
             "depthperpass": self.ui.maxdepth_entry,
+            "traceoffset": self.ui.traceoffset_radio,
             "selectmethod": self.ui.selectmethod_combo
         })
 
@@ -1652,6 +1738,7 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
                        spindlespeed=None,
                        multidepth=None,
                        depthperpass=None,
+                       traceoffset=None,
                        use_thread=True):
         """
         Creates a CNCJob out of this Geometry object. The actual
@@ -1674,6 +1761,10 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
         tooldia = tooldia if tooldia is not None else self.options["cnctooldia"]
         multidepth = multidepth if multidepth is not None else self.options["multidepth"]
         depthperpass = depthperpass if depthperpass is not None else self.options["depthperpass"]
+        traceoffset = (
+            traceoffset if traceoffset is not None
+            else self.options.get("traceoffset", "center")
+        )
 
         # To allow default value to be "" (optional in gui) and translate to None
         # if not isinstance(spindlespeed, int):
@@ -1703,11 +1794,14 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
             job_obj.spindlespeed = spindlespeed
             app_obj.progress.emit(40)
             # Path simplification tolerance follows project units (mm/in).
-            units = getattr(self, "units", None) or app_obj.options.get("units", "MM")
             tol = app_obj.options.get("cncjob_path_tolerance")
             if tol is None:
-                tol = flatcam_defaults.path_tolerance_for_units(units)
-            job_obj.generate_from_geometry_2(self,
+                tol = flatcam_defaults.path_tolerance_for_units("MM")
+            source = self.cnc_source_geometry(
+                tooldia=tooldia, offset=traceoffset
+            )
+            job_obj.generate_from_geometry_2(source,
+                                             tooldia=tooldia,
                                              multidepth=multidepth,
                                              depthpercut=depthperpass,
                                              tolerance=float(tol))
@@ -1782,27 +1876,17 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
         self.solid_geometry=translate_recursion(self.solid_geometry)
 
     def convert_units(self, units):
-        factor = Geometry.convert_units(self, units)
-
-        for key in (
-            "cutz",
-            "travelz",
-            "feedrate",
-            "cnctooldia",
-            "painttooldia",
-            "paintmargin",
-            "depthperpass",
-        ):
-            if key in self.options and self.options[key] is not None:
-                try:
-                    self.options[key] = float(self.options[key]) * factor
-                except (TypeError, ValueError):
-                    pass
-        # paintoverlap is a fraction — do not scale
-
-        return factor
+        return Geometry.convert_units(self, units)
 
     def plot_element(self, element):
+        try:
+            import theme as fc_theme
+            color = fc_theme.geometry_plot_color(
+                dark=bool(getattr(self.app, "dark_mode", False))
+            )
+        except Exception:
+            color = GEOMETRY_PLOT_COLOR
+
         # Lists of geometries
         if isinstance(element, (list, tuple)):
             for sub_el in element:
@@ -1813,13 +1897,35 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
         for part in to_geometry_list(element):
             if part.geom_type == "Polygon":
                 x, y = part.exterior.coords.xy
-                self.axes.plot(x, y, '-', color=GEOMETRY_PLOT_COLOR)
+                self.axes.plot(x, y, '-', color=color)
                 for ints in part.interiors:
                     x, y = ints.coords.xy
-                    self.axes.plot(x, y, '-', color=GEOMETRY_PLOT_COLOR)
+                    self.axes.plot(x, y, '-', color=color)
             elif part.geom_type in ("LineString", "LinearRing"):
+                tooldia = 0.0
+                try:
+                    tooldia = float(self.options.get("cnctooldia") or 0)
+                except (TypeError, ValueError):
+                    tooldia = 0.0
+                if tooldia > 0:
+                    ribbon = part.buffer(tooldia / 2.0)
+                    drawn = False
+                    for poly in to_geometry_list(ribbon):
+                        if getattr(poly, "geom_type", None) != "Polygon" or poly.is_empty:
+                            continue
+                        patch = PolygonPatch(
+                            poly, facecolor=color, edgecolor=color,
+                            alpha=0.7, zorder=2
+                        )
+                        self.axes.add_patch(patch)
+                        drawn = True
+                    if drawn:
+                        continue
                 x, y = part.coords.xy
-                self.axes.plot(x, y, '-', color=GEOMETRY_PLOT_COLOR)
+                self.axes.plot(x, y, '-', color=color)
+            elif part.geom_type == "Point":
+                x, y = part.coords.xy
+                self.axes.plot(x, y, 'o', color=color, markersize=6)
             else:
                 FlatCAMApp.App.log.warning("Did not plot:" + str(type(part)))
 

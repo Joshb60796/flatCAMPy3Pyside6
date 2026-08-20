@@ -1126,6 +1126,21 @@ class TestInitAndCoverageBranches(unittest.TestCase):
         job.tooldia = 0
         job.plot2(ax)
 
+    def test_plot2_labels_each_cut_start_once(self):
+        from matplotlib.figure import Figure
+
+        job = make_job()
+        job.generate_from_geometry_2(make_geometry(LineString([(0, 0), (2, 0)])))
+        job.gcode_parse()
+        fig = Figure()
+        ax = fig.add_subplot(111)
+        job.plot2(ax, tooldia=0.2)
+        first = [t.get_text() for t in ax.texts]
+        job.plot2(ax, tooldia=0.2)
+        second = [t.get_text() for t in ax.texts]
+        self.assertEqual(first, second)
+        self.assertEqual(len(second), len(set(second)))
+
     def test_export_svg_cuts_and_travels(self):
         job = make_job()
         job.generate_from_geometry_2(make_geometry(LineString([(0, 0), (1, 0)])))
@@ -1338,6 +1353,114 @@ class TestTclDrillCncjobPassesToolchangez(unittest.TestCase):
         from tclCommands.TclCommandDrillcncjob import TclCommandDrillcncjob
 
         self.assertIn("toolchangez", TclCommandDrillcncjob.option_types)
+
+
+class TestPolygonTraceAndOffset(unittest.TestCase):
+    def test_paths_for_cnc_center_follows_exterior(self):
+        square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+        geo = make_geometry(square)
+        paths = geo.paths_for_cnc(tooldia=2.0, offset="center")
+        self.assertEqual(len(paths), 1)
+        minx, miny, maxx, maxy = paths[0].bounds
+        self.assertAlmostEqual(minx, 0.0, places=5)
+        self.assertAlmostEqual(maxx, 10.0, places=5)
+        self.assertAlmostEqual(miny, 0.0, places=5)
+        self.assertAlmostEqual(maxy, 10.0, places=5)
+
+    def test_paths_for_cnc_outside_offsets_by_radius(self):
+        square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+        geo = make_geometry(square)
+        paths = geo.paths_for_cnc(tooldia=2.0, offset="outside")
+        self.assertGreaterEqual(len(paths), 1)
+        minx, miny, maxx, maxy = paths[0].bounds
+        self.assertAlmostEqual(minx, -1.0, places=5)
+        self.assertAlmostEqual(maxx, 11.0, places=5)
+
+    def test_paths_for_cnc_inside_offsets_by_radius(self):
+        square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+        geo = make_geometry(square)
+        paths = geo.paths_for_cnc(tooldia=2.0, offset="inside")
+        minx, miny, maxx, maxy = paths[0].bounds
+        self.assertAlmostEqual(minx, 1.0, places=5)
+        self.assertAlmostEqual(maxx, 9.0, places=5)
+
+    def test_polygon_to_gcode_is_safe(self):
+        square = Polygon([(0, 0), (8, 0), (8, 6), (0, 6)])
+        job = make_job(z_cut=-1.6, z_move=5.0, feedrate=100)
+        job.generate_from_geometry_2(make_geometry(square), tolerance=0.01)
+        report = assert_safe_gcode(job.gcode, job.z_cut, job.z_move)
+        self.assertLess(report.min_z, 0)
+        self.assertIn("G01", job.gcode)
+
+    def test_polygon_multidepth_for_small_bit(self):
+        # 1/32" (~0.8 mm) style profile: 1.6 mm deep in 0.2 mm pecks.
+        square = Polygon([(0, 0), (12, 0), (12, 8), (0, 8)])
+        source = make_geometry(square).cnc_source_geometry(
+            tooldia=0.79375, offset="outside"
+        )
+        job = make_job(z_cut=-1.6, z_move=5.0, feedrate=80)
+        job.generate_from_geometry_2(
+            source, multidepth=True, depthpercut=0.2, tolerance=0.01
+        )
+        report = assert_safe_gcode(job.gcode, job.z_cut, job.z_move)
+        zs = z_feed_values(job.gcode)
+        cut_zs = [z for z in zs if z < -1e-9]
+        self.assertGreaterEqual(len(cut_zs), 8)
+        self.assertAlmostEqual(min(cut_zs), -1.6, places=4)
+        self.assertGreaterEqual(report.min_z, -1.6 - COORD_EPS)
+
+    def test_invalid_offset_raises(self):
+        geo = make_geometry(Polygon([(0, 0), (1, 0), (1, 1)]))
+        with self.assertRaises(ValueError):
+            geo.paths_for_cnc(offset="sideways")
+
+
+class TestAddDrillAndPeck(unittest.TestCase):
+    def test_add_drill_creates_tool_and_point(self):
+        ex = Excellon()
+        tool = ex.add_drill(1.5, 2.5, diameter=0.8)
+        self.assertEqual(len(ex.drills), 1)
+        self.assertIn(tool, ex.tools)
+        self.assertAlmostEqual(ex.tools[tool]["C"], 0.8)
+        self.assertAlmostEqual(ex.drills[0]["point"].x, 1.5)
+        self.assertAlmostEqual(ex.drills[0]["point"].y, 2.5)
+        self.assertTrue(ex.solid_geometry)
+
+    def test_add_drill_reuses_same_diameter(self):
+        ex = Excellon()
+        t1 = ex.add_drill(0, 0, diameter=0.8)
+        t2 = ex.add_drill(1, 1, diameter=0.8)
+        self.assertEqual(t1, t2)
+        self.assertEqual(len(ex.tools), 1)
+        self.assertEqual(len(ex.drills), 2)
+
+    def test_peck_drilling_steps_to_cutz(self):
+        ex = make_excellon([("1", 1.0, 1.0)], tools={"1": 0.8})
+        job = make_job(z_cut=-1.6, z_move=5.0, feedrate=80)
+        job.generate_from_excellon_by_tool(
+            ex, tools="all", multidepth=True, depthpercut=0.4
+        )
+        assert_safe_gcode(job.gcode, job.z_cut, job.z_move)
+        zs = [z for z in z_feed_values(job.gcode) if z < -1e-9]
+        self.assertEqual(zs, [-0.4, -0.8, -1.2, -1.6])
+
+    def test_geometry_add_point(self):
+        geo = make_geometry(LineString([(0, 0), (1, 0)]))
+        geo.add_point((0.5, 0.25))
+        points = [
+            p for p in geo.solid_geometry
+            if getattr(p, "geom_type", None) == "Point"
+        ]
+        self.assertEqual(len(points), 1)
+        self.assertAlmostEqual(points[0].x, 0.5)
+        self.assertAlmostEqual(points[0].y, 0.25)
+
+    def test_single_plunge_unchanged_without_multidepth(self):
+        ex = make_excellon([("1", 1.0, 1.0)], tools={"1": 0.8})
+        job = make_job(z_cut=-1.8, z_move=5.0, feedrate=80)
+        job.generate_from_excellon_by_tool(ex, tools="all")
+        assert_safe_gcode(job.gcode, job.z_cut, job.z_move)
+        self.assertEqual(z_feed_values(job.gcode).count(-1.8), 1)
 
 
 if __name__ == "__main__":

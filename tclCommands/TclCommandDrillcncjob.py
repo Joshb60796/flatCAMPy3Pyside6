@@ -23,6 +23,8 @@ class TclCommandDrillcncjob(TclCommandSignaled):
         ('spindlespeed', int),
         ('toolchange', bool),
         ('toolchangez', float),
+        ('multidepth', bool),
+        ('depthperpass', float),
         ('outname', str)
     ])
 
@@ -41,6 +43,8 @@ class TclCommandDrillcncjob(TclCommandSignaled):
             ('spindlespeed', 'Speed of the spindle in rpm (example: 4000).'),
             ('toolchange', 'Enable tool changes (example: True).'),
             ('toolchangez', 'Z height for tool change; must be >= travelz.'),
+            ('multidepth', 'Peck drill in several passes.'),
+            ('depthperpass', 'Positive peck step until drillz.'),
             ('outname', 'Name of the resulting Geometry object.')
         ]),
         'examples': []
@@ -80,7 +84,11 @@ class TclCommandDrillcncjob(TclCommandSignaled):
 
             tools = args["tools"] if "tools" in args else 'all'
 
-            job_obj.generate_from_excellon_by_tool(obj, tools, toolchange, toolchangez)
+            job_obj.generate_from_excellon_by_tool(
+                obj, tools, toolchange, toolchangez,
+                multidepth=args.get("multidepth", obj.options.get("multidepth", False)),
+                depthpercut=args.get("depthperpass", obj.options.get("depthperpass")),
+            )
             job_obj.gcode_parse()
             job_obj.create_geometry()
 

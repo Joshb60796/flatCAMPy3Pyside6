@@ -16,7 +16,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from PySide6 import QtCore, QtWidgets
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Polygon
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -398,6 +398,7 @@ class TestSaveDialogExport(_AppTestBase):
             cnc.on_exportgcode_button_click()
         # No crash, no stray file in cwd named after the object.
         self.assertFalse(os.path.isfile("dlg_cnc.gcode"))
+        self.assertFalse(os.path.isfile("dlg_cnc.nc"))
 
     def test_bare_name_linuxcnc_filter_gets_ngc(self):
         cnc = self._cnc_with_ui()
@@ -432,6 +433,21 @@ class TestSaveDialogExport(_AppTestBase):
             self.assertTrue(os.path.isfile(out), "expected %s from filter %r" % (out, filt))
             assert_file_safe(self, out, cnc.z_cut, cnc.z_move)
             os.remove(out)
+
+    def test_dialog_suggests_nc_extension(self):
+        cnc = self._cnc_with_ui()
+        captured = {}
+
+        def fake_dialog(_parent, _title, start, _filt):
+            captured["start"] = start
+            return ("", "")
+
+        with patch(
+            "FlatCAMObj.QtWidgets.QFileDialog.getSaveFileName",
+            side_effect=fake_dialog,
+        ):
+            cnc.on_exportgcode_button_click()
+        self.assertTrue(captured["start"].replace("\\", "/").endswith(".nc"))
 
     def test_existing_extension_is_kept(self):
         cnc = self._cnc_with_ui()
@@ -533,6 +549,62 @@ class TestGenerateCncAndExcellonUi(_AppTestBase):
         self.assertIsInstance(cnc, FlatCAMCNCjob)
         assert_safe_gcode(cnc.gcode, cnc.z_cut, cnc.z_move)
 
+    def test_generatecncjob_traced_polygon_multidepth(self):
+        def init(obj, app):
+            obj.solid_geometry = [Polygon([(0, 0), (10, 0), (10, 6), (0, 6)])]
+            obj.units = "MM"
+
+        self.fc.new_object("geometry", "poly_geo", init)
+        geo = self.fc.collection.get_by_name("poly_geo")
+        self.assertIsInstance(geo, FlatCAMGeometry)
+        geo.generatecncjob(
+            use_thread=False,
+            z_cut=-1.6,
+            z_move=5.0,
+            feedrate=80,
+            tooldia=0.79375,
+            multidepth=True,
+            depthperpass=0.2,
+            traceoffset="outside",
+            outname="poly_cnc",
+        )
+        cnc = self.fc.collection.get_by_name("poly_cnc")
+        self.assertIsInstance(cnc, FlatCAMCNCjob)
+        assert_safe_gcode(cnc.gcode, cnc.z_cut, cnc.z_move)
+        self.assertIn("G01", cnc.gcode)
+        self.assertIn("Z-1.6000", cnc.gcode)
+
+    def test_add_drill_points_and_generate(self):
+        def init(obj, app):
+            obj.tools = {}
+            obj.drills = []
+            obj.solid_geometry = []
+
+        self.fc.new_object("excellon", "manual_holes", init)
+        exc = self.fc.collection.get_by_name("manual_holes")
+        self.assertIsInstance(exc, FlatCAMExcellon)
+        exc.add_drill(1.0, 1.0, diameter=0.8)
+        exc.add_drill(4.0, 2.0, diameter=0.8)
+        exc.options["drillz"] = -1.6
+        exc.options["travelz"] = 5.0
+        exc.options["feedrate"] = 80
+        exc.options["multidepth"] = True
+        exc.options["depthperpass"] = 0.4
+        exc.build_ui()
+        exc.ui.tools_table.selectColumn(0)
+        exc.on_create_cncjob_button_click()
+        cnc = self._wait_name("manual_holes_cnc")
+        self.assertIsInstance(cnc, FlatCAMCNCjob)
+        assert_safe_gcode(cnc.gcode, cnc.z_cut, cnc.z_move)
+        self.assertIn("X1.0000Y1.0000", cnc.gcode.replace(" ", ""))
+        self.assertIn("X4.0000Y2.0000", cnc.gcode.replace(" ", ""))
+
+    def test_dark_mode_toggle_does_not_crash(self):
+        self.fc.apply_theme(True, replot=True)
+        self.assertTrue(self.fc.dark_mode)
+        self.fc.apply_theme(False, replot=True)
+        self.assertFalse(self.fc.dark_mode)
+
     def test_excellon_create_cnc_no_tools_selected(self):
         self.fc.open_excellon(os.path.join(ROOT, "tests", "excellon_files", "case1.drl"))
         pump(self.qapp, 0.4)
@@ -579,6 +651,158 @@ class TestGenerateCncAndExcellonUi(_AppTestBase):
         ok, msg = exc.generate_milling(tools=[tool], tooldia=hole_dia + 1.0)
         self.assertFalse(ok)
         self.assertIn("larger than hole", msg)
+
+    def test_gerber_cutout_copies_endmill_to_cnc(self):
+        def init(obj, app):
+            obj.solid_geometry = Polygon([(0, 0), (20, 0), (20, 10), (0, 10)])
+            obj.units = "MM"
+
+        self.fc.new_object("gerber", "board", init)
+        gerber = self.fc.collection.get_by_name("board")
+        self.assertIsInstance(gerber, FlatCAMGerber)
+        gerber.build_ui()
+        gerber.ui.cutout_tooldia_entry.set_value(0.79375)
+        gerber.ui.cutout_margin_entry.set_value(0.2)
+        gerber.ui.cutout_gap_entry.set_value(1.0)
+        gerber.ui.gaps_radio.set_value("4")
+        gerber.on_generatecutout_button_click()
+        geo = self.fc.collection.get_by_name("board_cutout")
+        self.assertIsInstance(geo, FlatCAMGeometry)
+        self.assertAlmostEqual(float(geo.options["cnctooldia"]), 0.79375, places=5)
+        geo.generatecncjob(
+            use_thread=False,
+            z_cut=-1.6,
+            z_move=5.0,
+            feedrate=80,
+            outname="board_cutout_cnc",
+        )
+        cnc = self.fc.collection.get_by_name("board_cutout_cnc")
+        self.assertIsInstance(cnc, FlatCAMCNCjob)
+        self.assertAlmostEqual(float(cnc.options["tooldia"]), 0.79375, places=5)
+        self.assertAlmostEqual(float(cnc.tooldia), 0.79375, places=5)
+        assert_safe_gcode(cnc.gcode, cnc.z_cut, cnc.z_move)
+
+    def test_inch_cutout_keeps_thirty_second_inch_bit(self):
+        self.fc.exec_command_test("set_sys units IN")
+        self.fc.exec_command_test("new")
+
+        def init(obj, app):
+            obj.solid_geometry = Polygon([(0, 0), (4, 0), (4, 3), (0, 3)])
+            obj.units = "IN"
+
+        self.fc.new_object("gerber", "inch_board", init)
+        gerber = self.fc.collection.get_by_name("inch_board")
+        gerber.build_ui()
+        gerber.ui.cutout_tooldia_entry.set_value("0.03125in")
+        gerber.ui.cutout_margin_entry.set_value("0.01in")
+        gerber.ui.cutout_gap_entry.set_value("0.05in")
+        gerber.ui.gaps_radio.set_value("4")
+        gerber.on_generatecutout_button_click()
+        geo = self.fc.collection.get_by_name("inch_board_cutout")
+        self.assertAlmostEqual(float(geo.options["cnctooldia"]), 0.79375, places=5)
+        geo.generatecncjob(
+            use_thread=False,
+            z_cut=-1.6,
+            z_move=5.0,
+            feedrate=80,
+            outname="inch_board_cutout_cnc",
+        )
+        cnc = self.fc.collection.get_by_name("inch_board_cutout_cnc")
+        self.assertAlmostEqual(float(cnc.tooldia), 0.79375, places=5)
+        self.assertIn("G21", cnc.gcode)
+
+    def test_tcl_cutout_sets_cnctooldia(self):
+        def init(obj, app):
+            obj.solid_geometry = Polygon([(0, 0), (15, 0), (15, 8), (0, 8)])
+            obj.units = "MM"
+
+        self.fc.new_object("gerber", "tcl_board", init)
+        self.fc.exec_command_test(
+            "cutout tcl_board -dia 0.79375 -margin 0.2 -gapsize 1.0 -gaps 4"
+        )
+        geo = self.fc.collection.get_by_name("tcl_board_cutout")
+        self.assertIsInstance(geo, FlatCAMGeometry)
+        self.assertAlmostEqual(float(geo.options["cnctooldia"]), 0.79375, places=5)
+        self.assertFalse(geo.solid_geometry.is_empty)
+
+    def test_display_units_do_not_rescale_tools(self):
+        before = float(self.fc.options["gerber_cutouttooldia"])
+        geo = self._make_line_geometry("stay_geo", coords=((0, 0), (10, 0)))
+        b0 = geo.bounds()
+        self.fc.options_form.units_radio.set_value("IN")
+        self.assertAlmostEqual(
+            float(self.fc.options["gerber_cutouttooldia"]), before, places=6
+        )
+        self.assertEqual(str(self.fc.options["units"]).upper(), "IN")
+        self.assertEqual(geo.bounds(), b0)
+        self.assertEqual(str(geo.units).upper(), "MM")
+
+    def test_mixed_inch_bit_and_mm_depth(self):
+        geo = self._make_line_geometry("mix_geo")
+        geo.build_ui()
+        geo.ui.cnctooldia_entry.set_value("1/32in")
+        geo.ui.cutz_entry.set_value("-1.45mm")
+        geo.read_form()
+        self.assertAlmostEqual(float(geo.options["cnctooldia"]), 0.79375, places=5)
+        self.assertAlmostEqual(float(geo.options["cutz"]), -1.45, places=5)
+        self.assertEqual(geo.options["length_units"]["cnctooldia"], "IN")
+        self.assertEqual(geo.options["length_units"]["cutz"], "MM")
+        geo.ui.travelz_entry.set_value("5mm")
+        geo.ui.cncfeedrate_entry.set_value("120mm")
+        geo.read_form()
+        geo.generatecncjob(use_thread=False, outname="mix_geo_cnc")
+        cnc = self.fc.collection.get_by_name("mix_geo_cnc")
+        self.assertIn("G21", cnc.gcode)
+        self.assertIn("Z-1.4500", cnc.gcode)
+        self.assertAlmostEqual(float(cnc.tooldia), 0.79375, places=5)
+        assert_safe_gcode(cnc.gcode, cnc.z_cut, cnc.z_move)
+
+    def test_open_inch_gerber_is_stored_in_mm(self):
+        self.fc.open_gerber(GERBER)
+        pump(self.qapp, 0.3)
+        gerber = self.fc.collection.get_by_name("simple1.gbr")
+        self.assertIsInstance(gerber, FlatCAMGerber)
+        self.assertEqual(str(gerber.units).upper(), "MM")
+        minx, miny, maxx, maxy = gerber.bounds()
+        width = maxx - minx
+        # simple1 is ~0.55 in. Unconverted inches ≈ 0.55; once to mm ≈ 14;
+        # converted twice ≈ 350.
+        self.assertGreater(width, 5.0)
+        self.assertLess(width, 50.0)
+
+    def test_export_follows_display_units(self):
+        geo = self._make_line_geometry("exp_geo")
+        geo.generatecncjob(
+            use_thread=False, z_cut=-1.6, z_move=25.4, feedrate=254,
+            outname="exp_cnc",
+        )
+        cnc = self.fc.collection.get_by_name("exp_cnc")
+        self.assertIn("G21", cnc.gcode)
+        self.fc.options["units"] = "IN"
+        text = cnc.get_gcode()
+        self.assertIn("G20", text)
+        self.assertNotIn("G21\n", text)
+        self.assertIn("G21", cnc.gcode)
+        self.assertNotIn("Z-1.6000", text)
+        from gcode_safety import parse_gcode_words as _pw
+        inch_z = min(
+            _pw(line)["Z"] for line in text.splitlines() if "Z" in _pw(line)
+        )
+        self.assertAlmostEqual(inch_z, -1.6 / 25.4, places=3)
+
+    def test_add_point_to_geometry(self):
+        geo = self._make_line_geometry("pts")
+        geo.add_point((1.5, 2.5))
+        found = False
+        geoms = geo.solid_geometry
+        if not isinstance(geoms, list):
+            geoms = [geoms]
+        for part in geoms:
+            if getattr(part, "geom_type", None) == "Point":
+                self.assertAlmostEqual(part.x, 1.5, places=5)
+                self.assertAlmostEqual(part.y, 2.5, places=5)
+                found = True
+        self.assertTrue(found, "add_point did not insert a Point")
 
     def test_generate_milling_success(self):
         self.fc.open_excellon(os.path.join(ROOT, "tests", "excellon_files", "case1.drl"))

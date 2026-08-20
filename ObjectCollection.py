@@ -260,6 +260,16 @@ class ObjectCollection():
 
         #self.endRemoveRows()
 
+    def delete_object(self, obj):
+        """Remove ``obj`` from the collection regardless of selection."""
+        try:
+            row = self.object_list.index(obj)
+        except ValueError:
+            return False
+        self.object_list.pop(row)
+        self.model.removeRow(row)
+        return True
+
     def get_active(self):
         """
         Returns the active object or None
@@ -325,6 +335,8 @@ class ObjectCollection():
             FlatCAMApp.App.log.debug("on_list_selection_change(): Index Error (Nothing selected?)")
             return
 
+        if selection_index < 0 or selection_index >= len(self.object_list):
+            return
         self.object_list[selection_index].build_ui()
 
     def on_item_changed(self, item):

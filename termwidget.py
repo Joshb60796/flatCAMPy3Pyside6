@@ -125,8 +125,8 @@ class TermWidget(QWidget):
         :return: None
         """
 
-        self._edit.setTextColor(Qt.white)
-        self._edit.setTextBackgroundColor(Qt.darkGreen)
+        self._edit.setTextColor(QColor("#ffffff"))
+        self._edit.setTextBackgroundColor(QColor("#0b6e4f"))
         if detail is None:
             self._edit.setPlainText("...proccessing...")
         else:
@@ -140,8 +140,10 @@ class TermWidget(QWidget):
         :return:
         """
 
-        self._edit.setTextColor(Qt.black)
-        self._edit.setTextBackgroundColor(Qt.white)
+        fg = getattr(self, "_theme_fg", None) or QColor("#202020")
+        bg = getattr(self, "_theme_bg", None) or QColor("#ffffff")
+        self._edit.setTextColor(fg)
+        self._edit.setTextBackgroundColor(bg)
         self._edit.setPlainText('')
         self._edit.setDisabled(False)
         self._edit.setFocus()

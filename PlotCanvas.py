@@ -119,8 +119,9 @@ class PlotCanvas(QtCore.QObject):
         self.app = app
 
         # Options
-        self.x_margin = 15  # pixels
-        self.y_margin = 25  # Pixels
+        # Room for axis tick labels (see theme.PLOT_FONTSIZE).
+        self.x_margin = 36  # pixels
+        self.y_margin = 32  # Pixels
 
         # Parent container
         self.container = container
@@ -134,8 +135,16 @@ class PlotCanvas(QtCore.QObject):
         self.axes = self.figure.add_axes([0.05, 0.05, 0.9, 0.9], label="base", alpha=0.0)
         self.axes.set_aspect(1)
         self.axes.grid(True)
-        self.axes.axhline(color='Black')
-        self.axes.axvline(color='Black')
+        self.axes.axhline(color='#888888')
+        self.axes.axvline(color='#888888')
+        try:
+            from theme import PLOT_FONTSIZE
+            self.axes.tick_params(labelsize=PLOT_FONTSIZE, length=8, width=1.4)
+        except Exception:
+            self.axes.tick_params(labelsize=36, length=8, width=1.4)
+        self.dark_mode = False
+        self.display_units = "MM"
+        self._apply_tick_format()
 
         # The canvas is the top level container (FigureCanvasQTAgg)
         self.canvas = FigureCanvas(self.figure)
@@ -181,6 +190,24 @@ class PlotCanvas(QtCore.QObject):
 
         self.pan_axes = []
         self.panning = False
+
+    def _apply_tick_format(self):
+        from matplotlib.ticker import FuncFormatter, ScalarFormatter
+        if str(getattr(self, "display_units", "MM")).upper() == "IN":
+            fmt = FuncFormatter(lambda v, _p: ("%g" % (v / 25.4)))
+            self.axes.xaxis.set_major_formatter(fmt)
+            self.axes.yaxis.set_major_formatter(fmt)
+        else:
+            self.axes.xaxis.set_major_formatter(ScalarFormatter())
+            self.axes.yaxis.set_major_formatter(ScalarFormatter())
+
+    def set_display_units(self, units):
+        self.display_units = (units or "MM").upper()
+        self._apply_tick_format()
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
 
     def on_new_screen(self):
 
@@ -254,9 +281,18 @@ class PlotCanvas(QtCore.QObject):
         self.figure.add_axes(self.axes)
         self.axes.set_aspect(1)
         self.axes.grid(True)
+        self.axes.axhline(color='#888888')
+        self.axes.axvline(color='#888888')
+        self.apply_theme(getattr(self, "dark_mode", False))
 
         # Re-draw
         self.canvas.draw_idle()
+        on_cleared = getattr(self, "on_cleared", None)
+        if callable(on_cleared):
+            try:
+                on_cleared()
+            except Exception:
+                pass
 
     def adjust_axes(self, xmin, ymin, xmax, ymax):
         """
@@ -390,6 +426,15 @@ class PlotCanvas(QtCore.QObject):
         ##### Temporary place-holder for cached update #####
         self.update_screen_request.emit([0, 0, 0, 0, 0])
 
+    def apply_theme(self, dark=False):
+        """Recolor figure, axes, ticks, and grid for light/dark mode."""
+        self.dark_mode = bool(dark)
+        try:
+            import theme as fc_theme
+            fc_theme.apply_plotcanvas_theme(self, dark=self.dark_mode)
+        except Exception:
+            pass
+
     def new_axes(self, name):
         """
         Creates and returns an Axes object attached to this object's Figure.
@@ -399,7 +444,15 @@ class PlotCanvas(QtCore.QObject):
         :rtype: Axes
         """
 
-        return self.figure.add_axes([0.05, 0.05, 0.9, 0.9], label=name)
+        ax = self.figure.add_axes([0.05, 0.05, 0.9, 0.9], label=name)
+        try:
+            import theme as fc_theme
+            fc_theme.style_matplotlib_axes(
+                ax, self.figure, dark=getattr(self, "dark_mode", False)
+            )
+        except Exception:
+            pass
+        return ax
 
     def on_scroll(self, event):
         """

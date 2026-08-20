@@ -2,6 +2,44 @@
 # FlatCAM: 2D Post-processing for Manufacturing            #
 ############################################################
 
+def qt_widget_alive(widget):
+    """True if ``widget`` is a live Qt object (not a deleted Shiboken wrapper)."""
+    if widget is None:
+        return False
+    try:
+        from shiboken6 import isValid
+        return bool(isValid(widget))
+    except Exception:
+        pass
+    try:
+        widget.objectName()
+        return True
+    except RuntimeError:
+        return False
+
+
+def park_scroll_widget(scroll_area, new_widget):
+    """
+    Put ``new_widget`` in ``scroll_area`` without destroying the previous one.
+
+    QScrollArea.setWidget() deletes the current child. Object forms and the
+    options pages must survive being swapped out.
+    """
+    if scroll_area is None or new_widget is None:
+        return
+    if not qt_widget_alive(new_widget):
+        return
+    current = scroll_area.widget()
+    if current is new_widget:
+        return
+    taken = scroll_area.takeWidget()
+    if taken is not None and taken is not new_widget and qt_widget_alive(taken):
+        taken.setParent(None)
+        taken.hide()
+    scroll_area.setWidget(new_widget)
+    new_widget.show()
+
+
 class LoudDict(dict):
     """
     A Dictionary with a callback for

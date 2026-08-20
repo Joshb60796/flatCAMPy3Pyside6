@@ -64,20 +64,24 @@ class RadioSet(QtWidgets.QWidget):
 
 
 class LengthEntry(QtWidgets.QLineEdit):
-    def __init__(self, output_units='IN', parent=None):
+    """Length field: stores millimetres, shows ``0.005 in`` / ``1.45 mm``."""
+
+    def __init__(self, output_units='MM', parent=None):
         super(LengthEntry, self).__init__(parent)
 
-        self.output_units = output_units
-        self.format_re = re.compile(r"^([^\s]+)(?:\s([a-zA-Z]+))?$")
-
-        # Unit conversion table OUTPUT-INPUT
-        self.scales = {
-            'IN': {'IN': 1.0,
-                   'MM': 1/25.4},
-            'MM': {'IN': 25.4,
-                   'MM': 1.0}
-        }
+        self.display_units = (output_units or "MM").upper()
+        if self.display_units not in ("IN", "MM"):
+            self.display_units = "MM"
         self.readyToEdit = True
+
+    @property
+    def output_units(self):
+        return self.display_units
+
+    @output_units.setter
+    def output_units(self, val):
+        unit = (val or "MM").upper()
+        self.display_units = unit if unit in ("IN", "MM") else "MM"
 
     def mousePressEvent(self, e, Parent=None):
         # required to deselect on 2nd click
@@ -95,31 +99,53 @@ class LengthEntry(QtWidgets.QLineEdit):
     def returnPressed(self, *args, **kwargs):
         val = self.get_value()
         if val is not None:
-            self.set_text(str(val))
+            self.set_value(val)
         else:
-            log.warning("Could not interpret entry: %s" % self.get_text())
+            log.warning("Could not interpret entry: %s" % self.text())
 
     def get_value(self):
-        raw = str(self.text()).strip(' ')
-        # match = self.format_re.search(raw)
-
+        """Return millimetres. Updates display_units from a typed suffix."""
+        raw = str(self.text()).strip()
+        if raw == "":
+            return None
         try:
-            units = raw[-2:]
-            units = self.scales[self.output_units][units.upper()]
-            value = raw[:-2]
-            return float(eval(value))*units
-        except IndexError:
-            value = raw
-            return float(eval(value))
-        except KeyError:
-            value = raw
-            return float(eval(value))
-        except:
+            from units import parse_length
+            mm, unit = parse_length(raw, default_unit=self.display_units)
+            self.display_units = unit
+            return mm
+        except Exception:
             log.warning("Could not parse value in entry: %s" % str(raw))
             return None
 
     def set_value(self, val):
-        self.setText(str(val))
+        """
+        Show ``val`` with a unit suffix.
+
+        A number is millimetres. A string is parsed (``0.005in``, ``1.45mm``).
+        """
+        if val is None or val == "":
+            self.setText("")
+            return
+        try:
+            from units import format_length, parse_length
+        except Exception:
+            self.setText(str(val))
+            return
+        if isinstance(val, str):
+            try:
+                mm, unit = parse_length(val, default_unit=self.display_units)
+                self.display_units = unit
+                self.setText(format_length(mm, unit))
+                return
+            except ValueError:
+                self.setText(val)
+                return
+        try:
+            mm = float(val)
+        except (TypeError, ValueError):
+            self.setText(str(val))
+            return
+        self.setText(format_length(mm, self.display_units))
 
 
 class FloatEntry(QtWidgets.QLineEdit):

@@ -1,4 +1,5 @@
 from tclCommands.TclCommand import *
+from camlib import init_board_cutout
 
 
 class TclCommandCutout(TclCommand):
@@ -59,38 +60,14 @@ class TclCommandCutout(TclCommand):
             return "Could not retrieve object: %s" % name
 
         def geo_init_me(geo_obj, app_obj):
-            margin = args['margin'] + args['dia'] / 2
-            gap_size = args['dia'] + args['gapsize']
-            minx, miny, maxx, maxy = obj.bounds()
-            minx -= margin
-            maxx += margin
-            miny -= margin
-            maxy += margin
-            midx = 0.5 * (minx + maxx)
-            midy = 0.5 * (miny + maxy)
-            hgap = 0.5 * gap_size
-            pts = [[midx - hgap, maxy],
-                   [minx, maxy],
-                   [minx, midy + hgap],
-                   [minx, midy - hgap],
-                   [minx, miny],
-                   [midx - hgap, miny],
-                   [midx + hgap, miny],
-                   [maxx, miny],
-                   [maxx, midy - hgap],
-                   [maxx, midy + hgap],
-                   [maxx, maxy],
-                   [midx + hgap, maxy]]
-            cases = {"tb": [[pts[0], pts[1], pts[4], pts[5]],
-                            [pts[6], pts[7], pts[10], pts[11]]],
-                     "lr": [[pts[9], pts[10], pts[1], pts[2]],
-                            [pts[3], pts[4], pts[7], pts[8]]],
-                     "4": [[pts[0], pts[1], pts[2]],
-                           [pts[3], pts[4], pts[5]],
-                           [pts[6], pts[7], pts[8]],
-                           [pts[9], pts[10], pts[11]]]}
-            cuts = cases[args['gaps']]
-            geo_obj.solid_geometry = unary_union([LineString(segment) for segment in cuts])
+            init_board_cutout(
+                geo_obj,
+                obj.bounds(),
+                args['dia'],
+                margin=args['margin'],
+                gapsize=args['gapsize'],
+                gaps=args['gaps'],
+            )
 
         try:
             obj.app.new_object("geometry", name + "_cutout", geo_init_me)

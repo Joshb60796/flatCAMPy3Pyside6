@@ -179,6 +179,67 @@ def insert_polygon_rings(storage, polygon):
             storage.insert(interior)
 
 
+def board_cutout_geometry(bounds, tooldia, margin=0.0, gapsize=0.0, gaps="4"):
+    """
+    Tool-centerline cutout around a bounding box.
+
+    ``tooldia``, ``margin``, and ``gapsize`` must be in the same units as
+    ``bounds`` (xmin, ymin, xmax, ymax). The path is offset from the box by
+    ``margin + tooldia/2`` so a 0.03125" endmill in an inch project stays
+    0.03125 inches — not the isolation V-bit tip diameter.
+    """
+    tooldia = float(tooldia)
+    margin = float(margin) + tooldia / 2.0
+    gap_size = float(gapsize) + tooldia
+    minx, miny, maxx, maxy = bounds
+    minx -= margin
+    maxx += margin
+    miny -= margin
+    maxy += margin
+    midx = 0.5 * (minx + maxx)
+    midy = 0.5 * (miny + maxy)
+    hgap = 0.5 * gap_size
+    pts = [[midx - hgap, maxy],
+           [minx, maxy],
+           [minx, midy + hgap],
+           [minx, midy - hgap],
+           [minx, miny],
+           [midx - hgap, miny],
+           [midx + hgap, miny],
+           [maxx, miny],
+           [maxx, midy - hgap],
+           [maxx, midy + hgap],
+           [maxx, maxy],
+           [midx + hgap, maxy]]
+    cases = {"tb": [[pts[0], pts[1], pts[4], pts[5]],
+                    [pts[6], pts[7], pts[10], pts[11]]],
+             "lr": [[pts[9], pts[10], pts[1], pts[2]],
+                    [pts[3], pts[4], pts[7], pts[8]]],
+             "4": [[pts[0], pts[1], pts[2]],
+                   [pts[3], pts[4], pts[5]],
+                   [pts[6], pts[7], pts[8]],
+                   [pts[9], pts[10], pts[11]]]}
+    if gaps not in cases:
+        raise ValueError("Unsupported cutout gaps: %r" % gaps)
+    return unary_union([LineString(segment) for segment in cases[gaps]])
+
+
+def init_board_cutout(geo_obj, bounds, tooldia, margin=0.0, gapsize=0.0, gaps="4"):
+    """
+    Fill a geometry object with a board cutout and set its CNC tool diameter.
+
+    Isolation defaults ``cnctooldia`` to the V-bit tip. Cutout must overwrite
+    that with the endmill so the plot and G-code use the cutout diameter.
+    """
+    geo_obj.solid_geometry = board_cutout_geometry(
+        bounds, tooldia, margin=margin, gapsize=gapsize, gaps=gaps
+    )
+    options = getattr(geo_obj, "options", None)
+    if options is not None:
+        options["cnctooldia"] = float(tooldia)
+    return geo_obj
+
+
 class Geometry(object):
     """
     Base geometry class.
@@ -275,6 +336,25 @@ class Geometry(object):
         except:
             #print "Failed to run union on polygons."
             log.error("Failed to run union on polylines.")
+            raise
+
+    def add_point(self, origin):
+        """
+        Adds a Point (drill / plunge location) to the object.
+
+        :param origin: (x, y) or shapely Point
+        :return: None
+        """
+        if self.solid_geometry is None:
+            self.solid_geometry = []
+        pt = origin if getattr(origin, "geom_type", None) == "Point" else Point(origin)
+        if type(self.solid_geometry) is list:
+            self.solid_geometry.append(pt)
+            return
+        try:
+            self.solid_geometry = self.solid_geometry.union(pt)
+        except Exception:
+            log.error("Failed to add point to geometry.")
             raise
 
     def is_empty(self):
@@ -457,6 +537,63 @@ class Geometry(object):
                     self.flat_geometry.append(geo)
 
         return self.flat_geometry
+
+    def paths_for_cnc(self, tooldia=0.0, offset="center"):
+        """
+        Linear paths for G-code: polygon rings (optionally offset by
+        tool radius) plus existing lines and points.
+
+        offset:
+            * ``center``  — follow the polygon edge (tool centre on the line)
+            * ``inside``  — offset inward by tooldia/2 (pocket / inside cut)
+            * ``outside`` — offset outward by tooldia/2 (profile / outside cut)
+        """
+        offset = (offset or "center").lower()
+        if offset not in ("center", "inside", "outside"):
+            raise ValueError("offset must be center, inside, or outside; got %r" % offset)
+
+        radius = abs(float(tooldia or 0.0)) / 2.0
+        if offset == "inside":
+            delta = -radius
+        elif offset == "outside":
+            delta = radius
+        else:
+            delta = 0.0
+
+        paths = []
+        for geo in to_geometry_list(self.solid_geometry):
+            gtype = getattr(geo, "geom_type", None)
+            if gtype == "Polygon":
+                poly = geo
+                if delta != 0.0:
+                    try:
+                        poly = geo.buffer(delta)
+                    except Exception:
+                        log.warning("Polygon buffer failed; using original outline.")
+                        poly = geo
+                for part in to_geometry_list(poly):
+                    if getattr(part, "geom_type", None) != "Polygon":
+                        continue
+                    if part.is_empty:
+                        continue
+                    if part.exterior is not None and not part.exterior.is_empty:
+                        paths.append(part.exterior)
+                    for interior in part.interiors:
+                        if interior is not None and not interior.is_empty:
+                            paths.append(interior)
+            elif gtype in ("LineString", "LinearRing", "Point"):
+                if not geo.is_empty:
+                    paths.append(geo)
+            else:
+                log.warning("paths_for_cnc: skipping geometry type %s" % gtype)
+        return paths
+
+    def cnc_source_geometry(self, tooldia=0.0, offset="center"):
+        """Geometry whose solid_geometry is the CNC path list (for generate_from_geometry_2)."""
+        geo = Geometry()
+        geo.units = self.units
+        geo.solid_geometry = self.paths_for_cnc(tooldia=tooldia, offset=offset)
+        return geo
 
     # def make2Dstorage(self):
     #
@@ -2978,6 +3115,59 @@ class Excellon(Geometry):
             poly = drill['point'].buffer(tooldia / 2.0)
             self.solid_geometry.append(poly)
 
+    def next_tool_name(self):
+        nums = []
+        for key in self.tools:
+            try:
+                nums.append(int(key))
+            except (TypeError, ValueError):
+                continue
+        return str((max(nums) if nums else 0) + 1)
+
+    def ensure_tool(self, diameter, name=None, tol=1e-9):
+        """
+        Return a tool name for ``diameter``, creating one if needed.
+
+        Existing tools whose diameter matches within ``tol`` are reused.
+        """
+        diameter = float(diameter)
+        if name is not None:
+            name = str(name)
+            self.tools[name] = {"C": diameter}
+            return name
+        for tname, spec in self.tools.items():
+            try:
+                if abs(float(spec.get("C", 0.0)) - diameter) <= tol:
+                    return str(tname)
+            except (TypeError, ValueError):
+                continue
+        name = self.next_tool_name()
+        self.tools[name] = {"C": diameter}
+        return name
+
+    def add_drill(self, x, y, tool=None, diameter=None):
+        """
+        Add a drill point. Provide ``tool`` and/or ``diameter``.
+
+        If only diameter is given, a matching tool is reused or created.
+        Returns the tool name used.
+        """
+        if tool is None and diameter is None:
+            raise ValueError("Specify tool or diameter for add_drill.")
+        if tool is not None:
+            tool = str(tool)
+            if tool not in self.tools:
+                if diameter is None:
+                    raise ValueError("Unknown tool %s and no diameter given." % tool)
+                self.tools[tool] = {"C": float(diameter)}
+            elif diameter is not None:
+                self.tools[tool] = {"C": float(diameter)}
+        else:
+            tool = self.ensure_tool(diameter)
+        self.drills.append({"point": Point(float(x), float(y)), "tool": str(tool)})
+        self.create_geometry()
+        return str(tool)
+
     def scale(self, factor):
         """
         Scales geometry on the XY plane in the object by a given factor.
@@ -3177,6 +3367,9 @@ class CNCjob(Geometry):
         self.tooldia *= factor
 
         if self.gcode:
+            # XY/I/J already scaled by Geometry.convert_units → scale().
+            # Finish Z, F, and the G20/G21 word so a loaded inch job
+            # cannot keep millimetre depths under a G21 header or vice versa.
             self.gcode = scale_gcode_z_and_f(
                 self.gcode, factor, z_floor=float(self.z_cut)
             )
@@ -3228,20 +3421,37 @@ class CNCjob(Geometry):
             units=self.units,
         )
 
-    def get_gcode(self, preamble="", postamble="", dwell=False, dwelltime=1):
+    def _gcode_text(self, preamble="", postamble="", dwell=False, dwelltime=1,
+                    export_units=None):
         text = self.compose_gcode(
             preamble, postamble, dwell=dwell, dwelltime=dwelltime
         )
+        z_cut, z_move = self.z_cut, self.z_move
+        if export_units and str(export_units).upper() != str(self.units).upper():
+            from units import convert_gcode_units, to_mm, from_mm
+            dest = str(export_units).upper()
+            text = convert_gcode_units(text, self.units, dest)
+            z_cut = from_mm(to_mm(self.z_cut, self.units), dest)
+            z_move = from_mm(to_mm(self.z_move, self.units), dest)
+        return text, z_cut, z_move
+
+    def get_gcode(self, preamble="", postamble="", dwell=False, dwelltime=1,
+                  export_units=None):
+        text, z_cut, z_move = self._gcode_text(
+            preamble, postamble, dwell=dwell, dwelltime=dwelltime,
+            export_units=export_units,
+        )
         if str(text).strip():
-            assert_safe_gcode(text, self.z_cut, self.z_move)
+            assert_safe_gcode(text, z_cut, z_move)
         return text
 
     def export_gcode(self, filename, preamble="", postamble="",
-                     dwell=False, dwelltime=1):
-        text = self.compose_gcode(
-            preamble, postamble, dwell=dwell, dwelltime=dwelltime
+                     dwell=False, dwelltime=1, export_units=None):
+        text, z_cut, z_move = self._gcode_text(
+            preamble, postamble, dwell=dwell, dwelltime=dwelltime,
+            export_units=export_units,
         )
-        assert_safe_gcode(text, self.z_cut, self.z_move)
+        assert_safe_gcode(text, z_cut, z_move)
         with open(filename, "w") as f:
             f.write(text)
         return text
@@ -3256,8 +3466,47 @@ class CNCjob(Geometry):
         for line in StringIO(insert_dwell_after_spindle(text, dwelltime)):
             yield line
 
+    def _drill_cycle_gcode(self, multidepth=False, depthpercut=None):
+        """Plunge / peck / retract sequence for one hole (no XY)."""
+        up = "G00 Z%.4f\n" % self.z_move
+        up_to_zero = "G01 Z0\n"
+        if not multidepth:
+            return "G01 Z%.4f\n" % self.z_cut + up_to_zero + up
+
+        if isinstance(self.z_cut, Decimal):
+            z_cut = self.z_cut
+        else:
+            z_cut = Decimal(self.z_cut).quantize(Decimal("0.000000001"))
+
+        if depthpercut is None:
+            step = abs(z_cut) if z_cut != 0 else Decimal("0.001")
+        else:
+            if not isinstance(depthpercut, Decimal):
+                step = Decimal(depthpercut).quantize(Decimal("0.000000001"))
+            else:
+                step = depthpercut
+            step = abs(step)
+            if step == 0:
+                step = abs(z_cut) if z_cut != 0 else Decimal("0.001")
+
+        if z_cut >= 0:
+            return "G01 Z%.4f\n" % self.z_cut + up_to_zero + up
+
+        gcode = ""
+        depth = Decimal(0)
+        while depth > z_cut:
+            depth -= step
+            if depth < z_cut:
+                depth = z_cut
+            gcode += "G01 Z%.4f\n" % float(depth)
+            if depth > z_cut:
+                gcode += up_to_zero
+        gcode += up
+        return gcode
+
     def generate_from_excellon_by_tool(self, exobj, tools="all",
-                                       toolchange=False, toolchangez=None):
+                                       toolchange=False, toolchangez=None,
+                                       multidepth=False, depthpercut=None):
         """
         Creates gcode for this object from an Excellon object
         for the specified tools.
@@ -3270,6 +3519,8 @@ class CNCjob(Geometry):
         :type toolchange: bool
         :param toolchangez: Height at which to perform the tool change.
         :type toolchangez: float
+        :param multidepth: Peck-drill in steps of ``depthpercut``.
+        :param depthpercut: Positive peck step (same units as Cut Z).
         :return: None
         :rtype: None
         """
@@ -3305,9 +3556,9 @@ class CNCjob(Geometry):
                     points[drill['tool']] = [drill['point']]
 
         t = "G00 " + CNCjob.defaults["coordinate_format"] + "\n"
-        down = "G01 Z%.4f\n" % self.z_cut
-        up = "G00 Z%.4f\n" % self.z_move
-        up_to_zero = "G01 Z0\n"
+        cycle = self._drill_cycle_gcode(
+            multidepth=multidepth, depthpercut=depthpercut
+        )
 
         gcode = self._gcode_header()
 
@@ -3332,7 +3583,7 @@ class CNCjob(Geometry):
             for point in points[tool]:
                 x, y = point.coords.xy
                 gcode += t % (x[0], y[0])
-                gcode += down + up_to_zero + up
+                gcode += cycle
 
         gcode += self._gcode_footer()
         self.gcode = gcode
@@ -3721,6 +3972,27 @@ class CNCjob(Geometry):
         if tooldia is None:
             tooldia = self.tooldia
         
+        try:
+            from theme import PLOT_ANNOTATION_FONTSIZE
+            fontsize = PLOT_ANNOTATION_FONTSIZE
+        except Exception:
+            fontsize = 12
+        face = axes.get_facecolor()
+        try:
+            lum = float(face[0]) + float(face[1]) + float(face[2])
+        except Exception:
+            lum = 3.0
+        text_color = "#f2f2f2" if lum < 1.5 else "#1a1a1a"
+
+        # A second plot2() (or travel+cut starting at the same XY) used to
+        # stack two copies of the same label. Clear old numbers and label
+        # each cut start only once.
+        for artist in list(getattr(axes, "texts", [])):
+            try:
+                artist.remove()
+            except Exception:
+                pass
+
         if tooldia == 0:
             for geo in self.gcode_parsed:
                 linespec = '--'
@@ -3730,16 +4002,35 @@ class CNCjob(Geometry):
                 x, y = geo['geom'].coords.xy
                 axes.plot(x, y, linespec, color=linecolor)
         else:
-            for geo in self.gcode_parsed:
-                path_num += 1
-                axes.annotate(str(path_num), xy=geo['geom'].coords[0],
-                              xycoords='data')
-
+            labeled = set()
+            parsed = self.gcode_parsed or []
+            for geo in parsed:
                 poly = geo['geom'].buffer(tooldia / 2.0).simplify(tool_tolerance)
                 patch = PolygonPatch(poly, facecolor=color[geo['kind'][0]][0],
                                      edgecolor=color[geo['kind'][0]][1],
                                      alpha=alpha[geo['kind'][0]], zorder=2)
                 axes.add_patch(patch)
+
+                if geo.get('kind', ['C'])[0] != 'C':
+                    continue
+                coords = list(geo['geom'].coords)
+                if not coords:
+                    continue
+                start = (round(float(coords[0][0]), 5), round(float(coords[0][1]), 5))
+                if start in labeled:
+                    continue
+                labeled.add(start)
+                path_num += 1
+                axes.annotate(
+                    str(path_num),
+                    xy=coords[0],
+                    xycoords='data',
+                    fontsize=fontsize,
+                    color=text_color,
+                    zorder=4,
+                    ha='left',
+                    va='bottom',
+                )
         
     def create_geometry(self):
         # TODO: This takes forever. Too much data?

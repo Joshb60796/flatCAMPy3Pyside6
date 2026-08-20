@@ -68,6 +68,12 @@ class TclCommandSetSys(TclCommand):
 
             self.app.defaults[param] = value
             self.app.propagate_defaults()
+            if param == "units":
+                self.app.options["units"] = value
+                try:
+                    self.app.set_screen_units(value)
+                except Exception:
+                    pass
         else:
             self.raise_tcl_error("No such system parameter \"{}\".".format(param))
 

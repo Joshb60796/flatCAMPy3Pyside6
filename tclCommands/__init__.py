@@ -4,6 +4,8 @@ import sys
 
 # Explicit imports keep command modules registered in sys.modules.
 import tclCommands.TclCommandAddCircle
+import tclCommands.TclCommandAddDrill
+import tclCommands.TclCommandAddPoint
 import tclCommands.TclCommandAddPolygon
 import tclCommands.TclCommandAddPolyline
 import tclCommands.TclCommandAddRectangle
@@ -30,6 +32,7 @@ import tclCommands.TclCommandListSys
 import tclCommands.TclCommandMillHoles
 import tclCommands.TclCommandMirror
 import tclCommands.TclCommandNew
+import tclCommands.TclCommandNewExcellon
 import tclCommands.TclCommandNewGeometry
 import tclCommands.TclCommandOffset
 import tclCommands.TclCommandOpenExcellon
@@ -43,7 +46,10 @@ import tclCommands.TclCommandPlot
 import tclCommands.TclCommandSaveProject
 import tclCommands.TclCommandScale
 import tclCommands.TclCommandSetActive
+import tclCommands.TclCommandSetStock
 import tclCommands.TclCommandSetSys
+import tclCommands.TclCommandPlaceOnStock
+import tclCommands.TclCommandTileOnStock
 import tclCommands.TclCommandSubtractPoly
 import tclCommands.TclCommandSubtractRectangle
 import tclCommands.TclCommandVersion

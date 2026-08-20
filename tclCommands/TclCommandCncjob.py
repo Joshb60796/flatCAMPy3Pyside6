@@ -30,6 +30,7 @@ class TclCommandCncjob(TclCommandSignaled):
         ('spindlespeed', int),
         ('multidepth', bool),
         ('depthperpass', float),
+        ('traceoffset', str),
         ('outname', str)
     ])
 
@@ -48,6 +49,7 @@ class TclCommandCncjob(TclCommandSignaled):
             ('spindlespeed', 'Speed of the spindle in rpm (example: 4000).'),
             ('multidepth', 'Use or not multidepth cnccut.'),
             ('depthperpass', 'Height of one layer for multidepth.'),
+            ('traceoffset', 'Polygon tool offset: center, inside, or outside.'),
             ('outname', 'Name of the resulting Geometry object.')
         ]),
         'examples': []

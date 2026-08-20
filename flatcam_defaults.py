@@ -23,6 +23,45 @@ ENDMILL_DIA_MM = (1.0 / 32.0) * MM_PER_INCH    # 0.79375 mm
 ENDMILL_FLUTE_LEN_MM = 0.125 * MM_PER_INCH     # 3.175 mm (1/8" LOC)
 SHANK_DIA_MM = 0.125 * MM_PER_INCH             # 3.175 mm (1/8")
 
+# Default PCB blank: 100 mm × 70 mm (≈ 3.937" × 2.756")
+STOCK_WIDTH_MM = 100.0
+STOCK_HEIGHT_MM = 70.0
+STOCK_WIDTH_IN = STOCK_WIDTH_MM * INCH_PER_MM
+STOCK_HEIGHT_IN = STOCK_HEIGHT_MM * INCH_PER_MM
+
+# Older built-in blanks we replace so a saved defaults.json does not
+# keep showing 8×10" (203.2×254) or 3 7/8×2 13/16" after this change.
+_SUPERSEDED_STOCK_MM = (
+    (8.0 * MM_PER_INCH, 10.0 * MM_PER_INCH),
+    ((3.0 + 7.0 / 8.0) * MM_PER_INCH, (2.0 + 13.0 / 16.0) * MM_PER_INCH),
+)
+_SUPERSEDED_STOCK_IN = (
+    (8.0, 10.0),
+    (3.0 + 7.0 / 8.0, 2.0 + 13.0 / 16.0),
+)
+
+
+def migrate_stock_defaults(options):
+    """Rewrite superseded official stock sizes to the current 100×70 mm default."""
+    if options is None:
+        return options
+    try:
+        width = float(options.get("stock_width"))
+        height = float(options.get("stock_height"))
+    except (TypeError, ValueError):
+        return options
+    units = str(options.get("units", "MM")).upper()
+    if units == "IN":
+        pairs, target = _SUPERSEDED_STOCK_IN, (STOCK_WIDTH_IN, STOCK_HEIGHT_IN)
+    else:
+        pairs, target = _SUPERSEDED_STOCK_MM, (STOCK_WIDTH_MM, STOCK_HEIGHT_MM)
+    for old_w, old_h in pairs:
+        if abs(width - old_w) < 0.05 and abs(height - old_h) < 0.05:
+            options["stock_width"] = target[0]
+            options["stock_height"] = target[1]
+            break
+    return options
+
 # Keys that are lengths, depths, or feeds (scale with units).
 # Fractions (overlap), counts, RPM, dwell, strings must NOT be listed.
 DIMENSIONAL_OPTION_KEYS = frozenset({
@@ -37,6 +76,7 @@ DIMENSIONAL_OPTION_KEYS = frozenset({
     "excellon_feedrate",
     "excellon_toolchangez",
     "excellon_tooldia",
+    "excellon_depthperpass",
     "geometry_cutz",
     "geometry_travelz",
     "geometry_feedrate",
@@ -45,6 +85,13 @@ DIMENSIONAL_OPTION_KEYS = frozenset({
     "geometry_paintmargin",
     "geometry_depthperpass",
     "cncjob_tooldia",
+    "stock_width",
+    "stock_height",
+    "stock_spacing_x",
+    "stock_spacing_y",
+    "stock_margin",
+    "stock_place_x",
+    "stock_place_y",
 })
 
 # Unitless / non-scaling keys that must never be multiplied by 25.4
@@ -57,13 +104,21 @@ UNITLESS_OPTION_KEYS = frozenset({
     "geometry_pathconnect",
     "geometry_paintcontour",
     "geometry_multidepth",
+    "geometry_traceoffset",
     "geometry_selectmethod",
+    "excellon_multidepth",
     "geometry_paintmethod",
     "excellon_spindlespeed",
     "geometry_spindlespeed",
     "cncjob_dwell",
     "cncjob_dwelltime",
     "units",
+    "storage_units",
+    "length_units",
+    "stock_visible",
+    "stock_columns",
+    "stock_rows",
+    "stock_start_origin",
 })
 
 
@@ -98,7 +153,9 @@ def _mm_table():
         "excellon_feedrate": 100.0,                 # mm/min plunge
         "excellon_spindlespeed": None,              # blank → M03 only
         "excellon_toolchangez": 15.0,
-        "excellon_tooldia": ENDMILL_DIA_MM,         # mill-holes default endmill
+        "excellon_tooldia": ENDMILL_DIA_MM,         # mill-holes / add-point default
+        "excellon_multidepth": False,               # peck drilling
+        "excellon_depthperpass": 0.4,               # peck step (mm)
 
         # --- Geometry CNC (isolation follow / paint) ---
         "geometry_plot": True,
@@ -115,6 +172,7 @@ def _mm_table():
         "geometry_paintcontour": True,
         "geometry_multidepth": False,
         "geometry_depthperpass": 0.2,               # positive step (mm)
+        "geometry_traceoffset": "center",           # center | inside | outside
         "geometry_paintmethod": "standard",
 
         # --- CNC job display / export ---
@@ -127,6 +185,19 @@ def _mm_table():
 
         # Path simplification tolerance for G-code (mm)
         "cncjob_path_tolerance": 0.01,
+
+        # PCB material (stock) — 100 mm × 70 mm, origin at (0, 0)
+        "stock_width": STOCK_WIDTH_MM,
+        "stock_height": STOCK_HEIGHT_MM,
+        "stock_visible": True,
+        "stock_spacing_x": 2.0,
+        "stock_spacing_y": 2.0,
+        "stock_margin": 2.0,
+        "stock_place_x": 0.0,
+        "stock_place_y": 0.0,
+        "stock_columns": 1,
+        "stock_rows": 1,
+        "stock_start_origin": True,
     }
 
 
@@ -182,6 +253,7 @@ def app_persistent_defaults(units="MM"):
         "defaults_save_period_ms": 20000,
         "shell_shape": [500, 300],
         "shell_at_startup": False,
+        "gui_dark_mode": False,
         "recent_limit": 10,
         "fit_key": "1",
         "zoom_out_key": "2",
@@ -198,8 +270,14 @@ def app_persistent_defaults(units="MM"):
         "tool_endmill_dia_mm": ENDMILL_DIA_MM,
         "tool_endmill_flute_mm": ENDMILL_FLUTE_LEN_MM,
         "tool_shank_dia_mm": SHANK_DIA_MM,
+        "storage_units": "MM",
     }
     d.update(cam)
+    try:
+        from units import default_length_units
+        d.setdefault("length_units", default_length_units())
+    except Exception:
+        pass
     return d
 
 
@@ -219,18 +297,26 @@ def project_options_defaults(units="MM"):
         "excellon_plot", "excellon_solid",
         "excellon_drillz", "excellon_travelz", "excellon_feedrate",
         "excellon_spindlespeed", "excellon_toolchangez", "excellon_tooldia",
+        "excellon_multidepth", "excellon_depthperpass",
         "geometry_plot", "geometry_cutz", "geometry_travelz", "geometry_feedrate",
         "geometry_spindlespeed", "geometry_cnctooldia", "geometry_painttooldia",
         "geometry_paintoverlap", "geometry_paintmargin", "geometry_selectmethod",
         "geometry_pathconnect", "geometry_paintcontour",
         "geometry_multidepth", "geometry_depthperpass", "geometry_paintmethod",
+        "geometry_traceoffset",
         "cncjob_plot", "cncjob_tooldia", "cncjob_prepend", "cncjob_append",
         "cncjob_dwell", "cncjob_dwelltime",
         "cncjob_path_tolerance",
+        "stock_width", "stock_height", "stock_visible",
+        "stock_spacing_x", "stock_spacing_y", "stock_margin",
+        "stock_place_x", "stock_place_y",
+        "stock_columns", "stock_rows", "stock_start_origin",
         "background_timeout", "verbose_error_level",
+        "storage_units", "length_units",
     ]
-    return {k: cam[k] if k in cam else app_persistent_defaults(units).get(k)
-            for k in keys if k in cam or k in ("background_timeout", "verbose_error_level")}
+    persist = app_persistent_defaults(units)
+    return {k: cam[k] if k in cam else persist.get(k)
+            for k in keys if k in cam or k in persist}
 
 
 def object_option_defaults(kind, units="MM"):
@@ -239,7 +325,7 @@ def object_option_defaults(kind, units="MM"):
 
     kind: 'gerber' | 'excellon' | 'geometry' | 'cncjob'
     """
-    units = (units or "MM").upper()
+    units = "MM"
     cam = defaults_for_units(units)
     prefix = kind + "_"
     out = {"plot": True}
@@ -251,9 +337,12 @@ def object_option_defaults(kind, units="MM"):
         out.setdefault("combine_passes", cam.get("gerber_combine_passes", True))
     if kind == "excellon":
         out.setdefault("toolchange", False)
+        out.setdefault("multidepth", cam.get("excellon_multidepth", False))
+        out.setdefault("depthperpass", cam.get("excellon_depthperpass", 0.4 if units == "MM" else 0.4 * INCH_PER_MM))
     if kind == "geometry":
         out.setdefault("multidepth", cam.get("geometry_multidepth", False))
         out.setdefault("depthperpass", cam.get("geometry_depthperpass", 0.2 if units == "MM" else 0.2 * INCH_PER_MM))
+        out.setdefault("traceoffset", cam.get("geometry_traceoffset", "center"))
         out.setdefault("paintmethod", cam.get("geometry_paintmethod", "standard"))
         out.setdefault("pathconnect", cam.get("geometry_pathconnect", True))
         out.setdefault("paintcontour", cam.get("geometry_paintcontour", True))

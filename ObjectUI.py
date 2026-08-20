@@ -394,6 +394,25 @@ class GeometryObjectUI(ObjectUI):
 
         self.ois_mpass = OptionalInputSection(self.mpass_cb, [self.maxdepth_entry])
 
+        # Trace offset (tool centreline vs polygon edge)
+        offsetlabel = QtWidgets.QLabel('Trace offset:')
+        offsetlabel.setToolTip(
+            "Where the tool centre runs relative to\n"
+            "traced polygons (uses Tool dia):\n"
+            "  Center: on the drawn edge\n"
+            "  Inside: inset by half the tool\n"
+            "  Outside: outset by half the tool\n"
+            "Use Outside for a 1/32\" profile cut\n"
+            "around a traced outline."
+        )
+        grid1.addWidget(offsetlabel, 7, 0)
+        self.traceoffset_radio = RadioSet([
+            {"label": "Center", "value": "center"},
+            {"label": "Inside", "value": "inside"},
+            {"label": "Outside", "value": "outside"},
+        ])
+        grid1.addWidget(self.traceoffset_radio, 7, 1)
+
         # Button
         self.generate_cnc_button = QtWidgets.QPushButton('Generate')
         self.generate_cnc_button.setToolTip(
@@ -624,6 +643,25 @@ class ExcellonObjectUI(ObjectUI):
         self.spindlespeed_entry = IntEntry(allow_empty=True)
         grid1.addWidget(self.spindlespeed_entry, 5, 1)
 
+        mpasslabel = QtWidgets.QLabel('Peck / Multi-Depth:')
+        mpasslabel.setToolTip(
+            "Drill in several pecks instead of one\n"
+            "full-depth plunge. Safer for small bits\n"
+            "(e.g. 1/32\") through thicker stock."
+        )
+        grid1.addWidget(mpasslabel, 6, 0)
+        self.mpass_cb = FCCheckBox()
+        grid1.addWidget(self.mpass_cb, 6, 1)
+
+        maxdepthlabel = QtWidgets.QLabel('Depth/peck:')
+        maxdepthlabel.setToolTip(
+            "Positive peck step. Repeats until Cut Z."
+        )
+        grid1.addWidget(maxdepthlabel, 7, 0)
+        self.maxdepth_entry = LengthEntry()
+        grid1.addWidget(self.maxdepth_entry, 7, 1)
+        self.ois_mpass = OptionalInputSection(self.mpass_cb, [self.maxdepth_entry])
+
         choose_tools_label = QtWidgets.QLabel(
             "Select from the tools section above\n"
             "the tools you want to include."
@@ -665,6 +703,41 @@ class ExcellonObjectUI(ObjectUI):
             "for milling toolpaths."
         )
         self.custom_box.addWidget(self.generate_milling_button)
+
+        #### Add drill points ####
+        self.add_points_label = QtWidgets.QLabel('<b>Add Drill Points</b>')
+        self.add_points_label.setToolTip(
+            "Add holes by clicking the plot.\n"
+            "Uses the diameter and the CNC Job\n"
+            "parameters above (Cut Z, feed, ...)."
+        )
+        self.custom_box.addWidget(self.add_points_label)
+
+        grid_pts = QtWidgets.QGridLayout()
+        self.custom_box.addLayout(grid_pts)
+        adddialabel = QtWidgets.QLabel('Point dia:')
+        adddialabel.setToolTip(
+            "Diameter of holes to add.\n"
+            "A tool of this size is created or reused."
+        )
+        grid_pts.addWidget(adddialabel, 0, 0)
+        self.add_drill_dia_entry = LengthEntry()
+        grid_pts.addWidget(self.add_drill_dia_entry, 0, 1)
+
+        self.add_tool_button = QtWidgets.QPushButton('Add Tool')
+        self.add_tool_button.setToolTip(
+            "Register the diameter as a tool\n"
+            "without placing a hole yet."
+        )
+        self.custom_box.addWidget(self.add_tool_button)
+
+        self.place_points_btn = QtWidgets.QPushButton('Place points on plot')
+        self.place_points_btn.setCheckable(True)
+        self.place_points_btn.setToolTip(
+            "When checked, each left-click on the\n"
+            "plot adds a drill at that location."
+        )
+        self.custom_box.addWidget(self.place_points_btn)
 
 
 class GerberObjectUI(ObjectUI):
@@ -712,12 +785,11 @@ class GerberObjectUI(ObjectUI):
 
         grid1 = QtWidgets.QGridLayout()
         self.custom_box.addLayout(grid1)
-        tdlabel = QtWidgets.QLabel('Tool dia (mm/in):')
+        tdlabel = QtWidgets.QLabel('Tool dia:')
         tdlabel.setToolTip(
-            "Effective isolation kerf diameter in project units.\n"
-            "Default assumes a 0.003\" tip 30° V-bit (≈0.076 mm).\n"
-            "FlatCAM uses this as path offset width, not V-angle.\n"
-            "Bit: 1/8\" shank typical."
+            "Isolation kerf. Type a unit: 0.005in or 0.1mm.\n"
+            "Default is a 0.003 in tip 30° V-bit.\n"
+            "Kept in inches even when the board is millimetres."
         )
         grid1.addWidget(tdlabel, 0, 0)
         self.iso_tool_dia_entry = LengthEntry()
@@ -757,6 +829,14 @@ class GerberObjectUI(ObjectUI):
         )
         self.custom_box.addWidget(self.generate_iso_button)
 
+        self.follow_button = QtWidgets.QPushButton('Trace paths to Geometry')
+        self.follow_button.setToolTip(
+            "Copy this layer's polygons into a Geometry\n"
+            "object so you can generate G-Code that\n"
+            "traces their outlines (with multi-depth)."
+        )
+        self.custom_box.addWidget(self.follow_button)
+
         ## Board cuttout
         self.board_cutout_label = QtWidgets.QLabel("<b>Board cutout:</b>")
         self.board_cutout_label.setToolTip(
@@ -768,11 +848,10 @@ class GerberObjectUI(ObjectUI):
 
         grid2 = QtWidgets.QGridLayout()
         self.custom_box.addLayout(grid2)
-        tdclabel = QtWidgets.QLabel('Tool dia (mm/in):')
+        tdclabel = QtWidgets.QLabel('Tool dia:')
         tdclabel.setToolTip(
-            "Cutout endmill diameter in project units.\n"
-            "Default is 1/32\" (≈0.794 mm), 1/8\" shank,\n"
-            "1/8\" (≈3.18 mm) length of cut."
+            "Cutout endmill diameter. Type a unit: 1/32in or 0.8mm.\n"
+            "Default is 1/32 in (kept as inches even on a mm board)."
         )
         grid2.addWidget(tdclabel, 0, 0)
         self.cutout_tooldia_entry = LengthEntry()
