@@ -62,6 +62,32 @@ def migrate_stock_defaults(options):
             break
     return options
 
+
+def migrate_mill_profile_defaults(options):
+    """
+    Replace the previous official isolation profile (120 mm/min, Z-0.06,
+    no RPM) with 400 mm/min, Z-0.1, 13000 RPM. Custom values are kept.
+    """
+    if options is None:
+        return options
+
+    def _is_close(key, expected):
+        try:
+            return abs(float(options[key]) - expected) < 1e-6
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    if _is_close("geometry_feedrate", 120.0):
+        options["geometry_feedrate"] = 400.0
+    if _is_close("geometry_cutz", -0.06):
+        options["geometry_cutz"] = -0.1
+    if options.get("geometry_spindlespeed") in (None, ""):
+        options["geometry_spindlespeed"] = 13000
+    if options.get("excellon_spindlespeed") in (None, ""):
+        options["excellon_spindlespeed"] = 13000
+    return options
+
+
 # Keys that are lengths, depths, or feeds (scale with units).
 # Fractions (overlap), counts, RPM, dwell, strings must NOT be listed.
 DIMENSIONAL_OPTION_KEYS = frozenset({
@@ -151,7 +177,7 @@ def _mm_table():
         "excellon_drillz": -1.8,                    # through ~1.6 mm FR4 + breakthrough
         "excellon_travelz": 5.0,
         "excellon_feedrate": 100.0,                 # mm/min plunge
-        "excellon_spindlespeed": None,              # blank → M03 only
+        "excellon_spindlespeed": 13000,             # RPM
         "excellon_toolchangez": 15.0,
         "excellon_tooldia": ENDMILL_DIA_MM,         # mill-holes / add-point default
         "excellon_multidepth": False,               # peck drilling
@@ -159,10 +185,10 @@ def _mm_table():
 
         # --- Geometry CNC (isolation follow / paint) ---
         "geometry_plot": True,
-        "geometry_cutz": -0.06,                     # shallow isolation depth
+        "geometry_cutz": -0.1,                      # 0.1 mm below copper
         "geometry_travelz": 5.0,
-        "geometry_feedrate": 120.0,                 # mm/min XY isolation
-        "geometry_spindlespeed": None,
+        "geometry_feedrate": 400.0,                 # mm/min XY isolation
+        "geometry_spindlespeed": 13000,             # RPM
         "geometry_cnctooldia": VBIT_TIP_DIA_MM,     # match isolation V-bit
         "geometry_painttooldia": ENDMILL_DIA_MM,
         "geometry_paintoverlap": 0.15,              # fraction — never scale

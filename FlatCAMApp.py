@@ -316,6 +316,7 @@ class App(QtCore.QObject):
         if user_defaults:
             self.load_defaults()
             flatcam_defaults.migrate_stock_defaults(self.defaults)
+            flatcam_defaults.migrate_mill_profile_defaults(self.defaults)
             fc_units.migrate_storage_to_mm(
                 self.defaults, flatcam_defaults.DIMENSIONAL_OPTION_KEYS
             )

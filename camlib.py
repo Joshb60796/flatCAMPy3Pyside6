@@ -2633,8 +2633,14 @@ class Gerber (Geometry):
                 if match:
                     continue
 
-                ### Line did not match any pattern. Warn user.
-                log.warning("Line ignored (%d): %s" % (line_num, gline))
+                ### Line did not match any pattern.
+                # KiCad/X2 attributes (%TF/%TA/%TO/%TD) and %LN names are
+                # metadata — ignore at debug, not warning.
+                stripped = gline.lstrip()
+                if stripped.startswith(("%TF", "%TA", "%TO", "%TD", "%LN")):
+                    log.debug("Line ignored (%d): %s" % (line_num, gline))
+                else:
+                    log.warning("Line ignored (%d): %s" % (line_num, gline))
 
             if len(path) > 1:
                 # EOF, create shapely LineString if something still in path

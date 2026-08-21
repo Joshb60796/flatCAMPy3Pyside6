@@ -13,6 +13,7 @@ from camlib import *
 from FlatCAMCommon import LoudDict, park_scroll_widget, qt_widget_alive
 from FlatCAMDraw import FlatCAMDraw
 import flatcam_defaults
+from gcode_safety import normalize_cut_z
 
 
 ########################################
@@ -28,6 +29,10 @@ class FlatCAMObj(QtCore.QObject):
     # Instance of the application to which these are related.
     # The app should set this value.
     app = None
+
+    # Stored on the object (mixed-unit metadata, storage) but not bound
+    # to a widget. Form sync must skip these rather than warn.
+    _FORM_SKIP_OPTIONS = frozenset(("length_units", "storage_units"))
     
     option_changed = QtCore.Signal(QtCore.QObject, str)
 
@@ -184,7 +189,9 @@ class FlatCAMObj(QtCore.QObject):
         :return: None
         """
         FlatCAMApp.App.log.debug(str(inspect.stack()[1][3]) + "--> FlatCAMObj.to_form()")
-        for option in self.options:
+        for option in self.form_fields:
+            if option in self._FORM_SKIP_OPTIONS or option not in self.options:
+                continue
             try:
                 self.set_form_item(option)
             except:
@@ -198,7 +205,9 @@ class FlatCAMObj(QtCore.QObject):
         :rtype: None
         """
         FlatCAMApp.App.log.debug(str(inspect.stack()[1][3]) + "--> FlatCAMObj.read_form()")
-        for option in self.options:
+        for option in self.form_fields:
+            if option in self._FORM_SKIP_OPTIONS:
+                continue
             try:
                 self.read_form_item(option)
             except:
@@ -244,7 +253,7 @@ class FlatCAMObj(QtCore.QObject):
         :return: None
         """
 
-        if option in ("length_units", "storage_units"):
+        if option in self._FORM_SKIP_OPTIONS:
             return
         try:
             widget = self.form_fields[option]
@@ -254,7 +263,7 @@ class FlatCAMObj(QtCore.QObject):
                 widget.display_units = fc_units.unit_for_option(self.options, option)
             widget.set_value(self.options[option])
         except KeyError:
-            self.app.log.warning("Tried to set an option or field that does not exist: %s" % option)
+            self.app.log.debug("Tried to set an option or field that does not exist: %s" % option)
 
     def read_form_item(self, option):
         """
@@ -265,6 +274,8 @@ class FlatCAMObj(QtCore.QObject):
         :return: None
         """
 
+        if option in self._FORM_SKIP_OPTIONS:
+            return
         try:
             widget = self.form_fields[option]
             self.options[option] = widget.get_value()
@@ -273,8 +284,12 @@ class FlatCAMObj(QtCore.QObject):
                 lu = dict(self.options.get("length_units") or {})
                 lu[option] = widget.display_units
                 self.options["length_units"] = lu
+            if option in ("cutz", "drillz"):
+                self.options[option] = normalize_cut_z(self.options[option])
         except KeyError:
-            self.app.log.warning("Failed to read option from field: %s" % option)
+            # Internal keys (length_units, path_tolerance, etc.) live in
+            # options without a widget. Same policy as App.options_write_form_field.
+            self.app.log.debug("Failed to read option from field: %s" % option)
 
         # #try read field only when option have equivalent in form_fields
         # if option in self.form_fields:
@@ -790,7 +805,7 @@ class FlatCAMExcellon(FlatCAMObj, Excellon):
             "tooldia": cam.get("tooldia", flatcam_defaults.ENDMILL_DIA_MM),
             "toolchange": cam.get("toolchange", False),
             "toolchangez": cam.get("toolchangez", 15.0),
-            "spindlespeed": cam.get("spindlespeed", None),
+            "spindlespeed": cam.get("spindlespeed", 13000),
             "multidepth": cam.get("multidepth", False),
             "depthperpass": cam.get("depthperpass", 0.4),
         })
@@ -1071,7 +1086,7 @@ class FlatCAMExcellon(FlatCAMObj, Excellon):
                 "Initializer expected a FlatCAMCNCjob, got %s" % type(job_obj)
 
             app_obj.progress.emit(20)
-            job_obj.z_cut = self.options["drillz"]
+            job_obj.z_cut = normalize_cut_z(self.options["drillz"])
             job_obj.z_move = self.options["travelz"]
             job_obj.feedrate = self.options["feedrate"]
             job_obj.spindlespeed = self.options["spindlespeed"]
@@ -1480,10 +1495,10 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
 
         self.options.update({
             "plot": cam.get("plot", True),
-            "cutz": cam.get("cutz", -0.06),
+            "cutz": cam.get("cutz", -0.1),
             "travelz": cam.get("travelz", 5.0),
-            "feedrate": cam.get("feedrate", 120.0),
-            "spindlespeed": cam.get("spindlespeed", None),
+            "feedrate": cam.get("feedrate", 400.0),
+            "spindlespeed": cam.get("spindlespeed", 13000),
             "cnctooldia": cam.get("cnctooldia", flatcam_defaults.VBIT_TIP_DIA_MM),
             "painttooldia": cam.get("painttooldia", flatcam_defaults.ENDMILL_DIA_MM),
             "paintoverlap": cam.get("paintoverlap", 0.15),
@@ -1756,6 +1771,7 @@ class FlatCAMGeometry(FlatCAMObj, Geometry):
 
         outname = outname if outname is not None else self.options["name"] + "_cnc"
         z_cut = z_cut if z_cut is not None else self.options["cutz"]
+        z_cut = normalize_cut_z(z_cut)
         z_move = z_move if z_move is not None else self.options["travelz"]
         feedrate = feedrate if feedrate is not None else self.options["feedrate"]
         tooldia = tooldia if tooldia is not None else self.options["cnctooldia"]

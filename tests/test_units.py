@@ -79,6 +79,44 @@ class TestStorageMigration(unittest.TestCase):
         self.assertEqual(opts["storage_units"], "MM")
 
 
+class TestMillProfileDefaults(unittest.TestCase):
+    def test_isolation_defaults(self):
+        mm = d.defaults_for_units("MM")
+        self.assertAlmostEqual(mm["geometry_cutz"], -0.1)
+        self.assertAlmostEqual(mm["geometry_feedrate"], 400.0)
+        self.assertEqual(mm["geometry_spindlespeed"], 13000)
+        geo = d.object_option_defaults("geometry")
+        self.assertAlmostEqual(geo["cutz"], -0.1)
+        self.assertAlmostEqual(geo["feedrate"], 400.0)
+        self.assertEqual(geo["spindlespeed"], 13000)
+
+    def test_migrate_replaces_old_official_profile(self):
+        opts = {
+            "geometry_cutz": -0.06,
+            "geometry_feedrate": 120.0,
+            "geometry_spindlespeed": None,
+            "excellon_spindlespeed": None,
+        }
+        d.migrate_mill_profile_defaults(opts)
+        self.assertAlmostEqual(opts["geometry_cutz"], -0.1)
+        self.assertAlmostEqual(opts["geometry_feedrate"], 400.0)
+        self.assertEqual(opts["geometry_spindlespeed"], 13000)
+        self.assertEqual(opts["excellon_spindlespeed"], 13000)
+
+    def test_migrate_keeps_custom_feed_and_depth(self):
+        opts = {
+            "geometry_cutz": -1.45,
+            "geometry_feedrate": 254.0,
+            "geometry_spindlespeed": 8000,
+            "excellon_spindlespeed": 9000,
+        }
+        d.migrate_mill_profile_defaults(opts)
+        self.assertAlmostEqual(opts["geometry_cutz"], -1.45)
+        self.assertAlmostEqual(opts["geometry_feedrate"], 254.0)
+        self.assertEqual(opts["geometry_spindlespeed"], 8000)
+        self.assertEqual(opts["excellon_spindlespeed"], 9000)
+
+
 class TestGcodeExportUnits(unittest.TestCase):
     def test_mm_to_in_rewrites_header_and_xy(self):
         g = "G21\nG90\nF254.00\nG00 Z25.4000\nG00 X25.4000Y0.0000\nM05\n"

@@ -42,7 +42,7 @@ class TclCommandCncjob(TclCommandSignaled):
         'main': "Generates a CNC Job from a Geometry Object.",
         'args': collections.OrderedDict([
             ('name', 'Name of the source object.'),
-            ('z_cut', 'Z-axis cutting position.'),
+            ('z_cut', 'Z-axis cutting position or depth (positive 0.1 becomes Z-0.1).'),
             ('z_move', 'Z-axis moving position.'),
             ('feedrate', 'Moving speed when cutting.'),
             ('tooldia', 'Tool diameter to show on screen.'),

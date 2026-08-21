@@ -59,6 +59,26 @@ def parse_gcode_words(line: str) -> Dict[str, float]:
     return command
 
 
+def normalize_cut_z(z_cut):
+    """
+    Cut Z is below the stock surface (Z=0). A positive value is a
+    cutting *depth* (``0.1`` mm → ``Z-0.1``). Already-negative values
+    and zero are left unchanged.
+    """
+    if z_cut is None:
+        return None
+    try:
+        from decimal import Decimal
+        if isinstance(z_cut, Decimal):
+            return -z_cut if z_cut > 0 else z_cut
+    except Exception:
+        pass
+    value = float(z_cut)
+    if value > 0:
+        return -value
+    return z_cut
+
+
 def validate_cnc_parameters(
     z_cut,
     z_move,

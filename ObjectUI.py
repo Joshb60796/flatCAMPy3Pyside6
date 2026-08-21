@@ -318,8 +318,8 @@ class GeometryObjectUI(ObjectUI):
 
         cutzlabel = QtWidgets.QLabel('Cut Z:')
         cutzlabel.setToolTip(
-            "Cutting depth (negative)\n"
-            "below the copper surface."
+            "Depth below the copper surface.\n"
+            "0.1 mm and -0.1 mm both cut at Z-0.1."
         )
         grid1.addWidget(cutzlabel, 0, 0)
         self.cutz_entry = LengthEntry()
@@ -580,8 +580,8 @@ class ExcellonObjectUI(ObjectUI):
 
         cutzlabel = QtWidgets.QLabel('Cut Z:')
         cutzlabel.setToolTip(
-            "Drill depth (negative)\n"
-            "below the copper surface."
+            "Drill depth below the copper surface.\n"
+            "1.8 mm and -1.8 mm both drill at Z-1.8."
         )
         grid1.addWidget(cutzlabel, 0, 0)
         self.cutz_entry = LengthEntry()

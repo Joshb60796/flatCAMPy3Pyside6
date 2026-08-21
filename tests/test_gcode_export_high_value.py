@@ -522,6 +522,20 @@ class TestGenerateCncAndExcellonUi(_AppTestBase):
         self.assertAlmostEqual(float(cnc.options["tooldia"]), 0.3)
         assert_safe_gcode(cnc.gcode, cnc.z_cut, cnc.z_move)
 
+    def test_positive_cut_depth_writes_negative_z(self):
+        """A typed depth of 0.1 mm must cut at Z-0.1, not mill in air at Z+0.1."""
+        geo = self._make_line_geometry("depth_geo", coords=((0, 0), (5, 0)))
+        geo.build_ui()
+        geo.ui.cutz_entry.set_value("0.1mm")
+        geo.ui.travelz_entry.set_value("5mm")
+        geo.read_form()
+        geo.generatecncjob(use_thread=False, outname="depth_cnc")
+        cnc = self.fc.collection.get_by_name("depth_cnc")
+        self.assertAlmostEqual(float(cnc.z_cut), -0.1, places=5)
+        self.assertIn("Z-0.1000", cnc.gcode)
+        self.assertNotIn("G01 Z0.1000", cnc.gcode)
+        assert_safe_gcode(cnc.gcode, cnc.z_cut, cnc.z_move)
+
     def test_generatecncjob_default_tolerance_when_unset(self):
         geo = self._make_line_geometry("def_geo")
         self.fc.options.pop("cncjob_path_tolerance", None)

@@ -55,6 +55,7 @@ from gcode_safety import (
     compose_export_text,
     insert_dwell_after_spindle,
     parse_gcode_words,
+    normalize_cut_z,
     replace_unit_codes,
     rewrite_gcode_xy,
     scale_gcode_z_and_f,
@@ -184,6 +185,20 @@ class TestParseGcodeWords(unittest.TestCase):
         self.assertEqual(w["S"], 10000.0)
         w = parse_gcode_words("F120.00")
         self.assertEqual(w["F"], 120.0)
+
+
+class TestNormalizeCutZ(unittest.TestCase):
+    def test_positive_depth_becomes_negative_z(self):
+        self.assertAlmostEqual(normalize_cut_z(0.1), -0.1)
+        self.assertAlmostEqual(normalize_cut_z(0.01), -0.01)
+
+    def test_already_negative_is_unchanged(self):
+        self.assertAlmostEqual(normalize_cut_z(-0.1), -0.1)
+        self.assertAlmostEqual(normalize_cut_z(-1.45), -1.45)
+
+    def test_zero_and_none(self):
+        self.assertEqual(normalize_cut_z(0), 0)
+        self.assertIsNone(normalize_cut_z(None))
 
 
 class TestValidateCncParameters(unittest.TestCase):

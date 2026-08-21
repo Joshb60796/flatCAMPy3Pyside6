@@ -73,7 +73,9 @@ class TclCommandDrillcncjob(TclCommandSignaled):
             self.raise_tcl_error('Expected FlatCAMExcellon, got %s %s.' % (name, type(obj)))
 
         def job_init(job_obj, app):
-            job_obj.z_cut = args["drillz"] if "drillz" in args else obj.options["drillz"]
+            from gcode_safety import normalize_cut_z
+            drillz = args["drillz"] if "drillz" in args else obj.options["drillz"]
+            job_obj.z_cut = normalize_cut_z(drillz)
             job_obj.z_move = args["travelz"] if "travelz" in args else obj.options["travelz"]
             job_obj.feedrate = args["feedrate"] if "feedrate" in args else obj.options["feedrate"]
 

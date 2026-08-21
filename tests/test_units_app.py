@@ -1,6 +1,7 @@
 """App-level unit coverage: Excellon, project files, Tcl, plot ticks, forms."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tempfile
@@ -8,7 +9,7 @@ import time
 import unittest
 
 from PySide6 import QtCore, QtWidgets
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -265,3 +266,54 @@ class TestUnitsAppGaps(unittest.TestCase):
             self.assertAlmostEqual(
                 self.fc.stock_tool.width_entry.get_value(), 3.937 * MM_PER_INCH, places=2
             )
+
+    def _collect_base_warnings(self, fn):
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = Handler()
+        handler.setLevel(logging.WARNING)
+        log = logging.getLogger("base")
+        log.addHandler(handler)
+        try:
+            fn()
+        finally:
+            log.removeHandler(handler)
+        return records
+
+    def test_form_sync_does_not_warn_on_internal_options(self):
+        """length_units / path_tolerance / coordinate_format are not widgets."""
+
+        def init(obj, app):
+            obj.solid_geometry = [LineString([(0, 0), (10, 0)])]
+            obj.units = "MM"
+
+        self.fc.new_object("geometry", "form_warn_geo", init)
+        geo = self.fc.collection.get_by_name("form_warn_geo")
+        geo.build_ui()
+
+        geo_warns = self._collect_base_warnings(geo.read_form)
+        for key in ("length_units", "path_tolerance", "coordinate_format"):
+            matching = [m for m in geo_warns if key in m]
+            self.assertEqual(matching, [], "geometry read_form warned: %s" % matching)
+
+        geo.generatecncjob(
+            use_thread=False,
+            z_cut=-1.45,
+            z_move=5.0,
+            feedrate=120,
+            tooldia=0.79375,
+            outname="form_warn_cnc",
+        )
+        cnc = self.fc.collection.get_by_name("form_warn_cnc")
+        self.assertIsInstance(cnc, FlatCAMCNCjob)
+
+        to_form_warns = self._collect_base_warnings(cnc.build_ui)
+        read_warns = self._collect_base_warnings(cnc.read_form)
+        for key in ("length_units", "path_tolerance", "coordinate_format"):
+            matching = [m for m in to_form_warns + read_warns if key in m]
+            self.assertEqual(matching, [], "cncjob form sync warned: %s" % matching)
+        self.assertIn("length_units", cnc.options)
